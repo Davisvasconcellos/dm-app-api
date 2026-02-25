@@ -16,7 +16,8 @@ const EventJamSong = sequelize.define('EventJamSong', {
   release_batch: { type: DataTypes.INTEGER, allowNull: true },
   ready: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
   status: { type: DataTypes.ENUM('planned','open_for_candidates','on_stage','played','canceled'), allowNull: false, defaultValue: 'planned' },
-  order_index: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 }
+  order_index: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+  catalog_id: { type: DataTypes.INTEGER, allowNull: true }
 }, {
   tableName: 'event_jam_songs',
   timestamps: true,

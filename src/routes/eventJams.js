@@ -4,6 +4,7 @@ const { authenticateToken, requireRole, requireModule } = require('../middleware
 const jwt = require('jsonwebtoken');
 const { Op } = require('sequelize');
 const { Event, EventJam, EventJamSong, EventJamSongInstrumentSlot, EventJamSongCandidate, EventJamSongRating, EventGuest, User, EventJamMusicCatalog } = require('../models');
+const discogsService = require('../services/discogsService');
 
 const router = express.Router();
 
@@ -88,6 +89,7 @@ router.get('/:id/jams', authenticateToken, async (req, res) => {
         jam_id: j.id_code,
         title: s.title,
         artist: s.artist,
+        cover_image: s.cover_image,
         status: s.status,
         ready: !!s.ready,
         order_index: s.order_index,
@@ -246,8 +248,106 @@ router.post('/:id/jams/songs', authenticateToken, requireRole('admin', 'master')
       jam = await EventJam.create({ event_id: event.id, name: defaultName, slug: defaultSlug, status: 'active', order_index: 0 });
     }
 
-    const { title, artist, cover_image, extra_data, key, tempo_bpm, notes, release_batch, status, order_index, instrument_slots, catalog_id, pre_approved_candidates } = req.body;
+    let { title, artist, cover_image, extra_data, key, tempo_bpm, notes, release_batch, status, order_index, instrument_slots, catalog_id, pre_approved_candidates } = req.body;
     
+    // Auto-search Cover Image Logic
+    if (!cover_image) {
+      try {
+        // 1. Check Local Catalog first (if not provided explicitly)
+        if (!catalog_id) {
+          const localMatch = await EventJamMusicCatalog.findOne({
+            where: {
+              title: { [Op.like]: title }, // Exact match
+              artist: artist ? { [Op.like]: artist } : { [Op.ne]: null }
+            }
+          });
+          
+          if (localMatch) {
+            console.log(`[EventJams] Found local cover for "${title}"`);
+            cover_image = localMatch.cover_image;
+            if (!catalog_id) catalog_id = localMatch.id;
+          }
+        } else {
+          // If catalog_id is provided but no cover, fetch from catalog
+          const catalogItem = await EventJamMusicCatalog.findByPk(catalog_id);
+          if (catalogItem && catalogItem.cover_image) {
+            cover_image = catalogItem.cover_image;
+          }
+        }
+
+        // 2. Check Discogs if still no cover
+        if (!cover_image) {
+          const query = artist ? `${artist} - ${title}` : title;
+          console.log(`[EventJams] Searching Discogs for "${query}"`);
+          const results = await discogsService.search(query);
+          
+          if (results && results.length > 0) {
+            const bestMatch = results[0];
+            cover_image = bestMatch.cover_image;
+            
+            // Optional: Save to catalog for future use
+            // Check if exists first to avoid duplicates
+            const existing = await EventJamMusicCatalog.findOne({ where: { discogs_id: bestMatch.id } });
+            if (!existing) {
+              const newCatalogItem = await EventJamMusicCatalog.create({
+                discogs_id: bestMatch.id,
+                title: bestMatch.title,
+                artist: bestMatch.artist,
+                cover_image: bestMatch.cover_image,
+                thumb_image: bestMatch.thumb,
+                year: bestMatch.year,
+                genre: bestMatch.genre,
+                extra_data: bestMatch,
+                usage_count: 1
+              });
+              if (!catalog_id) catalog_id = newCatalogItem.id;
+            } else {
+               if (!catalog_id) catalog_id = existing.id;
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[EventJams] Error fetching cover image:', err);
+        // Continue without cover
+      }
+    }
+    
+    // Check if catalog_id is valid (Discogs ID vs Local ID)
+    if (catalog_id) {
+      try {
+        // First check if it exists locally as PK
+        let catalogItem = await EventJamMusicCatalog.findByPk(catalog_id);
+        
+        // If not found locally, maybe it's a Discogs ID?
+        if (!catalogItem) {
+          catalogItem = await EventJamMusicCatalog.findOne({ where: { discogs_id: catalog_id } });
+          
+          if (catalogItem) {
+            // Found by Discogs ID, update catalog_id to be the local PK
+            catalog_id = catalogItem.id;
+          } else {
+            // Not found locally at all. If we have details, create it.
+            if (cover_image && artist && title) {
+               catalogItem = await EventJamMusicCatalog.create({
+                 discogs_id: catalog_id, // Assume the passed ID was Discogs ID
+                 title: title,
+                 artist: artist,
+                 cover_image: cover_image,
+                 usage_count: 0
+               });
+               catalog_id = catalogItem.id;
+            } else {
+               // Cannot verify or create, so set to null to avoid FK error
+               catalog_id = null;
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[EventJams] Error validating catalog_id:', e);
+        catalog_id = null;
+      }
+    }
+
     // Start a transaction for data integrity
     const tx = await EventJamSong.sequelize.transaction();
     
@@ -256,6 +356,9 @@ router.post('/:id/jams/songs', authenticateToken, requireRole('admin', 'master')
 
       if (catalog_id) {
         try {
+          // Check if catalog_id is numeric (local ID) before using
+          // If it's a discogs ID (large number), we might need to find the local ID first
+          // But here we assume catalog_id refers to EventJamMusicCatalog.id (PK)
           await EventJamMusicCatalog.increment('usage_count', { where: { id: catalog_id }, transaction: tx });
         } catch (e) {
           console.error('Erro ao incrementar usage_count:', e);
