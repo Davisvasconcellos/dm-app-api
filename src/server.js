@@ -92,6 +92,7 @@ const specs = swaggerJsdoc(swaggerOptions);
 // Security middleware
 app.use(helmet({
   crossOriginResourcePolicy: false,
+  contentSecurityPolicy: false, // Necessário para permitir scripts inline na página de status
 }));
 
 // CORS configuration
@@ -128,22 +129,78 @@ const shouldCompress = (req, res) => {
 app.use(compression({ filter: shouldCompress }));
 
 // Rate limiting (agora funciona corretamente com trust proxy)
+// Ajustado para eventos: 300 reqs/min por IP (suporta ~200 usuários simultâneos intensos)
+
+// Middleware de monitoramento de requisições por IP (Debug)
+// Variável global para armazenar métricas
+const metrics = {
+  ips: {},
+  routes: {},
+  totalRequests: 0,
+  startTime: Date.now()
+};
+
+// Limpa contadores a cada minuto
+setInterval(() => {
+  metrics.ips = {};
+  metrics.routes = {};
+  metrics.totalRequests = 0;
+  metrics.startTime = Date.now();
+}, 60000);
+
+if (process.env.NODE_ENV === 'development') {
+  app.use((req, res, next) => {
+    // Ignora requisições de métricas para não poluir os dados
+    if (req.path === '/api/status-metrics') return next();
+
+    const ip = req.ip;
+    metrics.totalRequests++;
+    
+    // Contagem por IP
+    metrics.ips[ip] = (metrics.ips[ip] || 0) + 1;
+    
+    // Contagem por Rota (agrupa por método e path genérico)
+    const routeKey = `${req.method} ${req.path}`;
+    metrics.routes[routeKey] = (metrics.routes[routeKey] || 0) + 1;
+
+    if (metrics.ips[ip] % 10 === 0) { // Loga a cada 10 requisições
+      console.log(`[DEBUG RATE] IP: ${ip} | Reqs/Min: ${metrics.ips[ip]} | Rota: ${req.method} ${req.originalUrl}`);
+    }
+    next();
+  });
+}
+
 const limiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 1 * 60 * 1000, // 1 minuto
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 300, // 300 requests por minuto
+  handler: (req, res, next, options) => {
+    console.warn(`[RATE LIMIT] IP bloqueado: ${req.ip} - Rota: ${req.method} ${req.originalUrl}`);
+    res.status(options.statusCode).json(options.message);
+  },
+  skip: (req) => req.originalUrl.includes('/status-metrics'), // Ignora o endpoint de status
   message: {
     error: 'Too many requests',
-    message: 'Muitas requisições. Tente novamente mais tarde.'
+    message: 'Muitas requisições. Tente novamente em alguns segundos.'
   },
   standardHeaders: true,
   legacyHeaders: false,
 });
 
-// Slow down
+// Slow down - Começa a atrasar respostas após 200 requests em 1 min
 const speedLimiter = slowDown({
-  windowMs: 15 * 60 * 1000,
-  delayAfter: 50,
-  delayMs: () => 500,
+  windowMs: 1 * 60 * 1000, // 1 minuto
+  delayAfter: 200, // Começa a atrasar após 200 requests
+  delayMs: () => 500, // Adiciona 500ms de delay por request extra
+  skip: (req) => req.originalUrl.includes('/status-metrics'), // Ignora o endpoint de status
+});
+
+// Limitador específico para o dashboard de status (para não consumir cota global mas evitar abuso)
+const statusLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minuto
+  max: 60, // 60 requests por minuto (1 por segundo - suficiente para o refresh de 2s)
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many status updates' }
 });
 
 // Aplica limiter e slowdown em tudo, exceto na rota SSE
@@ -190,6 +247,26 @@ app.get('/', (req, res) => {
   const seconds = Math.floor(uptimeSeconds % 60);
   const uptimeString = `${hours}h ${minutes}m ${seconds}s`;
 
+  // Limite de Rate Limit
+  const rateLimitMax = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 300;
+  const currentIp = req.ip;
+  const currentIpCount = metrics.ips[currentIp] || 0;
+  const currentIpPercent = Math.min((currentIpCount / rateLimitMax) * 100, 100).toFixed(1);
+
+  // Tempo restante para reset
+  const timeSinceReset = Date.now() - metrics.startTime;
+  const timeToReset = Math.max(0, 60000 - timeSinceReset);
+  const secondsToReset = Math.ceil(timeToReset / 1000);
+
+  // Prepara dados de métricas para exibição (apenas se for admin ou dev - aqui aberto para demo)
+  const topIps = Object.entries(metrics.ips)
+    .sort(([,a], [,b]) => b - a)
+    .slice(0, 5); // Top 5 IPs
+    
+  const topRoutes = Object.entries(metrics.routes)
+    .sort(([,a], [,b]) => b - a)
+    .slice(0, 5); // Top 5 Rotas
+
   const html = `
     <!DOCTYPE html>
     <html lang="pt-BR">
@@ -204,9 +281,10 @@ app.get('/', (req, res) => {
           display: flex;
           justify-content: center;
           align-items: center;
-          height: 100vh;
+          min-height: 100vh;
           margin: 0;
           color: #333;
+          padding: 20px;
         }
         .container {
           background: white;
@@ -214,8 +292,8 @@ app.get('/', (req, res) => {
           border-radius: 12px;
           box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
           text-align: center;
-          max-width: 500px;
-          width: 90%;
+          max-width: 600px;
+          width: 100%;
         }
         .status-dot {
           height: 12px;
@@ -244,6 +322,62 @@ app.get('/', (req, res) => {
         .footer { margin-top: 2rem; font-size: 0.85rem; color: #9ca3af; }
         a { color: #4f46e5; text-decoration: none; font-weight: 500; }
         a:hover { text-decoration: underline; }
+        
+        .metrics-section {
+          margin-top: 1.5rem;
+          text-align: left;
+          border-top: 1px solid #e5e7eb;
+          padding-top: 1rem;
+        }
+        .metrics-title {
+          font-size: 0.9rem;
+          font-weight: 600;
+          color: #374151;
+          margin-bottom: 0.5rem;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+        }
+        .metric-list {
+          list-style: none;
+          padding: 0;
+          margin: 0;
+          font-size: 0.85rem;
+        }
+        .metric-item {
+          display: flex;
+          justify-content: space-between;
+          padding: 4px 0;
+          border-bottom: 1px dashed #e5e7eb;
+        }
+        .metric-item:last-child { border-bottom: none; }
+        .metric-count {
+          background: #fee2e2;
+          color: #991b1b;
+          padding: 1px 6px;
+          border-radius: 10px;
+          font-size: 0.75rem;
+          font-weight: bold;
+        }
+        .refresh-hint {
+          font-size: 0.75rem;
+          color: #9ca3af;
+          font-weight: normal;
+        }
+        .progress-bar-bg {
+          background-color: #e5e7eb;
+          height: 6px;
+          border-radius: 3px;
+          margin-top: 4px;
+          overflow: hidden;
+        }
+        .progress-bar-fill {
+          height: 100%;
+          background-color: #6366f1;
+          transition: width 0.3s ease;
+        }
+        .warning-text { color: #d97706; }
+        .danger-text { color: #dc2626; }
       </style>
     </head>
     <body>
@@ -286,15 +420,164 @@ app.get('/', (req, res) => {
           </div>
         </div>
 
+        <!-- Real-time Metrics Section -->
+        <div class="metrics-section" id="metrics-container">
+          <div class="metrics-title">
+            <span>Traffic Control (Reset in <span id="reset-timer">${secondsToReset}</span>s)</span>
+            <span class="refresh-hint" id="refresh-status">Live Updates</span>
+          </div>
+
+          <!-- Current IP Status -->
+          <div style="background: #f3f4f6; padding: 10px; border-radius: 6px; margin-bottom: 1rem;">
+            <div style="display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 4px;">
+              <span style="font-weight: 600;">Your IP (<span id="current-ip">${currentIp === '::1' ? 'Localhost' : currentIp}</span>)</span>
+              <span id="usage-text" style="font-weight: 600; color: ${currentIpPercent > 80 ? '#dc2626' : '#4b5563'}">
+                ${currentIpCount} / ${rateLimitMax} reqs
+              </span>
+            </div>
+            <div class="progress-bar-bg">
+              <div id="usage-bar" class="progress-bar-fill" style="width: ${currentIpPercent}%; background-color: ${currentIpPercent > 80 ? '#dc2626' : (currentIpPercent > 50 ? '#d97706' : '#10b981')}"></div>
+            </div>
+          </div>
+          
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.5rem;">
+            <div>
+              <div style="font-size: 0.8rem; font-weight: 600; color: #6b7280; margin-bottom: 4px;">Top IPs</div>
+              <ul class="metric-list" id="top-ips">
+                ${topIps.length ? topIps.map(([ip, count]) => `
+                  <li class="metric-item">
+                    <span title="${ip}">${ip === '::1' ? 'Localhost' : ip.substring(0, 15)}</span>
+                    <span class="metric-count">${count}</span>
+                  </li>
+                `).join('') : '<li class="metric-item" style="color: #9ca3af;">No traffic</li>'}
+              </ul>
+            </div>
+            
+            <div>
+              <div style="font-size: 0.8rem; font-weight: 600; color: #6b7280; margin-bottom: 4px;">Top Routes</div>
+              <ul class="metric-list" id="top-routes">
+                ${topRoutes.length ? topRoutes.map(([route, count]) => `
+                  <li class="metric-item">
+                    <span title="${route}" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px;">${route}</span>
+                    <span class="metric-count">${count}</span>
+                  </li>
+                `).join('') : '<li class="metric-item" style="color: #9ca3af;">No traffic</li>'}
+              </ul>
+            </div>
+          </div>
+          
+          <div style="margin-top: 10px; font-size: 0.8rem; text-align: right; color: #6b7280;">
+            Global Total (1m): <b id="total-requests">${metrics.totalRequests}</b>
+          </div>
+        </div>
+
         <div class="footer">
           &copy; ${new Date().getFullYear()} DM-APP Team. All systems nominal.
         </div>
       </div>
+      <script>
+        // Update timer every second locally
+        const timerEl = document.getElementById('reset-timer');
+        setInterval(() => {
+          let val = parseInt(timerEl.innerText);
+          if (val > 0) timerEl.innerText = val - 1;
+        }, 1000);
+
+        // Fetch metrics every 2 seconds without reloading page
+        async function updateMetrics() {
+          if (document.visibilityState !== 'visible') return;
+          
+          try {
+            const res = await fetch('/api/status-metrics');
+            if (!res.ok) return;
+            const data = await res.json();
+            
+            // Update Timer
+            timerEl.innerText = data.secondsToReset;
+
+            // Update Usage Text & Bar
+            const usageText = document.getElementById('usage-text');
+            const usageBar = document.getElementById('usage-bar');
+            
+            usageText.innerText = \`\${data.currentIpCount} / \${data.rateLimitMax} reqs\`;
+            usageText.style.color = data.currentIpPercent > 80 ? '#dc2626' : '#4b5563';
+            
+            usageBar.style.width = \`\${data.currentIpPercent}%\`;
+            usageBar.style.backgroundColor = data.currentIpPercent > 80 ? '#dc2626' : (data.currentIpPercent > 50 ? '#d97706' : '#10b981');
+
+            // Update Top IPs
+            const ipsList = document.getElementById('top-ips');
+            if (data.topIps.length) {
+              ipsList.innerHTML = data.topIps.map(([ip, count]) => \`
+                  <li class="metric-item">
+                    <span title="\${ip}">\${ip === '::1' ? 'Localhost' : ip.substring(0, 15)}</span>
+                    <span class="metric-count">\${count}</span>
+                  </li>
+              \`).join('');
+            } else {
+              ipsList.innerHTML = '<li class="metric-item" style="color: #9ca3af;">No traffic</li>';
+            }
+
+            // Update Top Routes
+            const routesList = document.getElementById('top-routes');
+            if (data.topRoutes.length) {
+              routesList.innerHTML = data.topRoutes.map(([route, count]) => \`
+                  <li class="metric-item">
+                    <span title="\${route}" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px;">\${route}</span>
+                    <span class="metric-count">\${count}</span>
+                  </li>
+              \`).join('');
+            } else {
+              routesList.innerHTML = '<li class="metric-item" style="color: #9ca3af;">No traffic</li>';
+            }
+
+            // Update Total
+            document.getElementById('total-requests').innerText = data.totalRequests;
+
+          } catch (e) {
+            console.error('Metrics update failed', e);
+          }
+        }
+
+        setInterval(updateMetrics, 10000);
+      </script>
     </body>
     </html>
   `;
   
   res.send(html);
+});
+
+// Endpoint leve para atualização via AJAX (ignorado pelo contador global, mas com proteção própria)
+app.get('/api/status-metrics', statusLimiter, (req, res) => {
+  // Limite de Rate Limit
+  const rateLimitMax = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 300;
+  const currentIp = req.ip;
+  const currentIpCount = metrics.ips[currentIp] || 0;
+  const currentIpPercent = Math.min((currentIpCount / rateLimitMax) * 100, 100).toFixed(1);
+
+  // Tempo restante para reset
+  const timeSinceReset = Date.now() - metrics.startTime;
+  const timeToReset = Math.max(0, 60000 - timeSinceReset);
+  const secondsToReset = Math.ceil(timeToReset / 1000);
+
+  const topIps = Object.entries(metrics.ips)
+    .sort(([,a], [,b]) => b - a)
+    .slice(0, 5);
+    
+  const topRoutes = Object.entries(metrics.routes)
+    .sort(([,a], [,b]) => b - a)
+    .slice(0, 5);
+
+  res.json({
+    rateLimitMax,
+    currentIpCount,
+    currentIpPercent,
+    secondsToReset,
+    topIps,
+    topRoutes,
+    totalRequests: metrics.totalRequests
+  });
 });
 
 // Health check

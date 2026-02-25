@@ -45,11 +45,12 @@ router.get('/:id/jams/:jamId/stream', (req, res) => {
   });
 });
 
-router.get('/:id/jams', authenticateToken, requireRole('admin', 'master'), requireModule('events'), async (req, res) => {
+router.get('/:id/jams', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const event = await Event.findOne({ where: { id_code: id } });
   if (!event) return res.status(404).json({ error: 'Not Found', message: 'Evento não encontrado' });
-  if (req.user.role !== 'master' && event.created_by !== req.user.userId) return res.status(403).json({ error: 'Access denied' });
+  // Permissão relaxada para permitir convidados verem as jams
+  // if (req.user.role !== 'master' && event.created_by !== req.user.userId) return res.status(403).json({ error: 'Access denied' });
   const onlyReal = String(req.query.only_real || 'false').toLowerCase() === 'true';
   const jams = await EventJam.findAll({
     where: { event_id: event.id },
