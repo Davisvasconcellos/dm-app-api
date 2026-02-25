@@ -79,7 +79,7 @@ async function seedDatabase() {
     const users = await User.bulkCreate([
       {
         name: 'Admin Master',
-        email: 'admin@beerclub.com',
+        email: 'admin@dm-app.com',
         phone: '(11) 99999-9999',
         password_hash: hashedPassword,
         role: 'admin',

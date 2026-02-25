@@ -62,7 +62,7 @@ const swaggerOptions = {
   definition: {
     openapi: '3.0.0',
     info: {
-      title: 'BeerClub API',
+      title: 'DM-APP API',
       version: '1.0.0',
       description: 'API para sistema de bares e restaurantes',
     },
@@ -165,7 +165,7 @@ app.use('/uploads', express.static('uploads'));
 // ROTA RAIZ
 app.get('/', (req, res) => {
   res.json({
-    message: 'BeerClub API - OK',
+    message: 'DM-APP API - OK',
     environment: process.env.NODE_ENV || 'development',
     docs: process.env.NODE_ENV === 'development' 
       ? `${process.env.API_PUBLIC_BASE_URL || `http://localhost:${PORT}`}/api-docs` 
@@ -209,7 +209,7 @@ app.get('/api/stream-test', (req, res) => {
   // Envia mensagem inicial
   res.write(`data: ${JSON.stringify({ 
     type: 'connection', 
-    message: 'Conectado ao BeerClub SSE', 
+    message: 'Conectado ao DM-APP SSE', 
     time: new Date().toISOString() 
   })}\n\n`);
 

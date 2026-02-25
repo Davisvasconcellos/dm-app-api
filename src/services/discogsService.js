@@ -8,7 +8,7 @@ const axios = require('axios');
 class DiscogsService {
   constructor() {
     this.baseUrl = 'https://api.discogs.com';
-    this.userAgent = 'BeerClubApp/1.0';
+    this.userAgent = 'DM-APP/1.0';
     // Use mock mode if keys are not present in environment
     this.mockMode = !process.env.DISCOGS_CONSUMER_KEY || !process.env.DISCOGS_CONSUMER_SECRET;
     if (process.env.NODE_ENV === 'test' || process.env.MOCK_DISCOGS === 'true') {
