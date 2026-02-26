@@ -79,10 +79,10 @@ const findOrCreateFolder = async (folderName, parentId) => {
  */
 const resolveFolderPath = async (pathString) => {
   console.log(`🔍 [ResolvePath] Iniciando resolução para: "${pathString}"`);
-  
+
   // Remove aspas que podem vir do form-data mal formatado e espaços
   const cleanPath = pathString.replace(/['"]/g, '').trim();
-  
+
   // Se não foi passado folder ou é 'uploads' genérico, usa a raiz configurada
   if (!cleanPath || cleanPath === 'uploads') {
     console.log(`🔍 [ResolvePath] Usando raiz padrão (path vazio ou 'uploads')`);
@@ -138,24 +138,24 @@ async function logDebugToDrive(logData) {
   try {
     const LOG_FOLDER_NAME = 'LOG';
     const LOG_FILE_NAME = 'upload_debug.csv';
-    
+
     // 1. Achar ou criar pasta LOG na raiz configurada
     const rootId = process.env.GOOGLE_DRIVE_FOLDER_ID;
     console.log(`📝 [LogRemoto] Buscando pasta '${LOG_FOLDER_NAME}' dentro de: ${rootId || 'RAIZ (My Drive)'}`);
-    
+
     // Tenta usar a pasta fornecida manualmente pelo usuário se definida, senão busca/cria
     let logFolderId = null;
     const MANUAL_LOG_ID = '1Fpt7CqX7tJbFJ_CasvLLLAXrJY_BSXZT'; // ID fixo fornecido pelo usuário
 
     // Tenta verificar se temos acesso à pasta manual
     try {
-        await drive.files.get({ fileId: MANUAL_LOG_ID, fields: 'id' });
-        console.log(`📝 [LogRemoto] Pasta LOG manual (${MANUAL_LOG_ID}) acessível. Usando ela.`);
-        logFolderId = MANUAL_LOG_ID;
+      await drive.files.get({ fileId: MANUAL_LOG_ID, fields: 'id' });
+      console.log(`📝 [LogRemoto] Pasta LOG manual (${MANUAL_LOG_ID}) acessível. Usando ela.`);
+      logFolderId = MANUAL_LOG_ID;
     } catch (e) {
-        console.warn(`⚠️ [LogRemoto] Não foi possível acessar a pasta manual (${MANUAL_LOG_ID}). Motivo: ${e.message}`);
-        console.log('📝 [LogRemoto] Tentando encontrar ou criar pasta LOG via findOrCreateFolder...');
-        logFolderId = await findOrCreateFolder(LOG_FOLDER_NAME, rootId);
+      console.warn(`⚠️ [LogRemoto] Não foi possível acessar a pasta manual (${MANUAL_LOG_ID}). Motivo: ${e.message}`);
+      console.log('📝 [LogRemoto] Tentando encontrar ou criar pasta LOG via findOrCreateFolder...');
+      logFolderId = await findOrCreateFolder(LOG_FOLDER_NAME, rootId);
     }
 
     console.log(`📝 [LogRemoto] ID final da pasta LOG: ${logFolderId}`);
@@ -176,7 +176,7 @@ async function logDebugToDrive(logData) {
       // Baixar conteúdo atual
       try {
         const file = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'stream' });
-        
+
         // Ler stream para string
         const chunks = [];
         for await (const chunk of file.data) {
@@ -187,13 +187,13 @@ async function logDebugToDrive(logData) {
         console.warn('⚠️ [LogRemoto] Erro ao ler log existente, criando novo conteúdo.', err.message);
       }
     } else {
-        console.log(`📝 [LogRemoto] Arquivo de log não encontrado. Criando novo.`);
+      console.log(`📝 [LogRemoto] Arquivo de log não encontrado. Criando novo.`);
     }
 
     // 3. Adicionar nova linha
     const timestamp = new Date().toISOString();
     const escapeCsv = (val) => `"${String(val || '').replace(/"/g, '""').replace(/\n/g, ' ')}"`;
-    
+
     const newRow = [
       timestamp,
       logData.requestFolder,
@@ -233,7 +233,7 @@ async function logDebugToDrive(logData) {
   } catch (error) {
     console.error('❌ [LogRemoto] FALHA CRÍTICA:', error.message);
     if (error.response && error.response.data) {
-        console.error('❌ [LogRemoto] Detalhes do erro API:', JSON.stringify(error.response.data, null, 2));
+      console.error('❌ [LogRemoto] Detalhes do erro API:', JSON.stringify(error.response.data, null, 2));
     }
   }
 }
@@ -294,24 +294,24 @@ const uploadFileToDrive = async (fileObject, folderName) => {
 
     // Log Sucesso
     logDebugToDrive({
-        requestFolder: folderName,
-        cleanPath,
-        resolvedParentId: parentFolderId,
-        fileName: fileObject.originalname,
-        status: 'SUCCESS',
-        message: `File ID: ${data.id}`
+      requestFolder: folderName,
+      cleanPath,
+      resolvedParentId: parentFolderId,
+      fileName: fileObject.originalname,
+      status: 'SUCCESS',
+      message: `File ID: ${data.id}`
     });
 
     return data;
   } catch (error) {
     // Log Erro
     logDebugToDrive({
-        requestFolder: folderName,
-        cleanPath,
-        resolvedParentId: parentFolderId,
-        fileName: fileObject.originalname,
-        status: 'ERROR',
-        message: error.message
+      requestFolder: folderName,
+      cleanPath,
+      resolvedParentId: parentFolderId,
+      fileName: fileObject.originalname,
+      status: 'ERROR',
+      message: error.message
     });
     throw error;
   }
@@ -379,7 +379,7 @@ router.post('/', upload.single('file'), async (req, res) => {
     }
 
     const folder = req.body.folder || 'uploads'; // 'events', 'users', etc. (Currently unused in uploadFileToDrive logic, but good for future extension)
-    
+
     // Upload para o Drive
     const result = await uploadFileToDrive(req.file, folder);
 
@@ -387,7 +387,7 @@ router.post('/', upload.single('file'), async (req, res) => {
 
     // Retorna a URL pública
     // const publicUrl = `https://drive.usercontent.google.com/download?id=${result.id}&authuser=0`; // Antigo (Link direto Google)
-    
+
     // Constrói a URL do Proxy da própria API
     const apiBaseUrl = process.env.API_PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
     const downloadName = result.name || req.file.originalname || 'file';
@@ -411,4 +411,4 @@ router.post('/', upload.single('file'), async (req, res) => {
   }
 });
 
-module.exports = router;
+module.exports = { uploadRouter: router, uploadFileToDrive };

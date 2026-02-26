@@ -22,7 +22,11 @@ const slowDown = require('express-slow-down');
 const swaggerJsdoc = require('swagger-jsdoc');
 const swaggerUi = require('swagger-ui-express');
 
-const authMiddleware = require('./middlewares/auth');
+const { authenticateToken, requireRole } = require('./middlewares/auth');
+const { TokenBlocklist } = require('./models');
+const { Op } = require('sequelize');
+const cron = require('node-cron');
+const { generatePendingTransactions } = require('./services/recurrenceService');
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -34,7 +38,7 @@ const footballTeamsRoutes = require('./routes/footballTeams');
 const eventRoutes = require('./routes/events');
 const eventOpenRoutes = require('./routes/eventsOpen');
 const eventJamsRoutes = require('./routes/eventJams');
-const uploadRoutes = require('./routes/upload');
+const { uploadRouter, uploadFileToDrive } = require('./routes/upload');
 const filesRoutes = require('./routes/files');
 const financialRoutes = require('./routes/financial');
 const finRecurrenceRoutes = require('./routes/finRecurrences');
@@ -140,13 +144,72 @@ const metrics = {
   startTime: Date.now()
 };
 
-// Limpa contadores a cada minuto
-setInterval(() => {
+// Limpa contadores a cada minuto (referência guardada para graceful shutdown)
+const metricsInterval = setInterval(() => {
   metrics.ips = {};
   metrics.routes = {};
   metrics.totalRequests = 0;
   metrics.startTime = Date.now();
 }, 60000);
+
+// Limpeza automática de tokens expirados da blocklist (a cada 1 hora)
+// Evita crescimento indefinido da tabela token_blocklists
+const blocklistCleanupInterval = setInterval(async () => {
+  try {
+    const deleted = await TokenBlocklist.destroy({
+      where: { expiresAt: { [Op.lt]: new Date() } }
+    });
+    if (deleted > 0) {
+      console.log(`[Blocklist Cleanup] ${deleted} token(s) expirado(s) removido(s).`);
+    }
+  } catch (err) {
+    console.error('[Blocklist Cleanup] Erro ao limpar tokens:', err.message);
+  }
+}, 60 * 60 * 1000); // 1 hora
+
+// CRON JOB: Processamento diário de recorrências financeiras
+// Roda todos os dias às 00:05 para provisionar as transações que venceram
+const recurrenceCronJob = cron.schedule('5 0 * * *', async () => {
+  console.log('[Cron] Iniciando processamento de recorrências financeiras...');
+  const results = await generatePendingTransactions();
+  console.log(`[Cron] Processamento concluído: ${results.processed} lidas, ${results.generated} geradas, ${results.errors} erros.`);
+});
+
+// CRON JOB: Sincronização periódica dos logs de Rate Limit para o Google Drive
+// Roda a cada 2 horas (ou ajustar conforme necessidade)
+const logSyncCronJob = cron.schedule('0 */2 * * *', async () => {
+  console.log('[Cron] Verificando logs locais para sincronização com o Drive...');
+  const logFilePath = path.join(process.cwd(), 'rate-limit-blocks.log');
+
+  if (fs.existsSync(logFilePath)) {
+    try {
+      const stats = fs.statSync(logFilePath);
+      // Sincroniza apenas se o arquivo for maior que o cabeçalho base de ~35 bytes
+      if (stats.size > 50) {
+        const fileContent = fs.readFileSync(logFilePath);
+
+        // Simular um File Object como esperado pelo Multer
+        const fileObject = {
+          originalname: `rate_limit_logs_${new Date().toISOString().replace(/[:.]/g, '-')}.log`,
+          buffer: fileContent,
+          mimetype: 'text/plain',
+        };
+
+        console.log(`[Cron] Iniciando upload do log de ${stats.size} bytes para o Drive...`);
+        // Faz o upload para a pasta 'Logs' no drive
+        await uploadFileToDrive(fileObject, 'Logs');
+        console.log('[Cron] Upload concluído. Limpando log local.');
+
+        // Limpa o log (mas mantém o cabeçalho inicial se desejar, ou apenas trunca)
+        fs.writeFileSync(logFilePath, '=== DM-APP API Rate Limit Logs ===\n');
+      } else {
+        console.log('[Cron] Arquivo de log pequeno/vazio, pulando sync.');
+      }
+    } catch (e) {
+      console.error('[Cron] Falha ao sincronizar os logs para o Drive:', e.message);
+    }
+  }
+});
 
 if (process.env.NODE_ENV === 'development') {
   app.use((req, res, next) => {
@@ -155,10 +218,10 @@ if (process.env.NODE_ENV === 'development') {
 
     const ip = req.ip;
     metrics.totalRequests++;
-    
+
     // Contagem por IP
     metrics.ips[ip] = (metrics.ips[ip] || 0) + 1;
-    
+
     // Contagem por Rota (agrupa por método e path genérico)
     const routeKey = `${req.method} ${req.path}`;
     metrics.routes[routeKey] = (metrics.routes[routeKey] || 0) + 1;
@@ -170,14 +233,27 @@ if (process.env.NODE_ENV === 'development') {
   });
 }
 
+const isLocalhost = (ip) => ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 1 * 60 * 1000, // 1 minuto
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 300, // 300 requests por minuto
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000, // 1000 requests por minuto (suporta redes NAT com muitos convidados de evento)
   handler: (req, res, next, options) => {
-    console.warn(`[RATE LIMIT] IP bloqueado: ${req.ip} - Rota: ${req.method} ${req.originalUrl}`);
+    const logMsg = `[${new Date().toISOString()}] 429 BLOCK | IP: ${req.ip} | Rota: ${req.method} ${req.originalUrl} | User-Agent: ${req.headers['user-agent'] || 'N/A'} | Origin: ${req.headers.origin || req.headers.referer || 'N/A'}\n`;
+    console.warn(logMsg.trim());
+    try {
+      fs.appendFileSync(path.join(process.cwd(), 'rate-limit-blocks.log'), logMsg);
+    } catch (e) {
+      console.error('Falha ao escrever log de rate limit:', e.message);
+    }
     res.status(options.statusCode).json(options.message);
   },
-  skip: (req) => req.originalUrl.includes('/status-metrics'), // Ignora o endpoint de status
+  skip: (req) => {
+    // Ignora status-metrics ou se for localhost EM desenvolvimento
+    if (req.originalUrl.includes('/status-metrics')) return true;
+    if (process.env.NODE_ENV === 'development' && isLocalhost(req.ip)) return true;
+    return false;
+  },
   message: {
     error: 'Too many requests',
     message: 'Muitas requisições. Tente novamente em alguns segundos.'
@@ -186,12 +262,15 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 
-// Slow down - Começa a atrasar respostas após 200 requests em 1 min
 const speedLimiter = slowDown({
   windowMs: 1 * 60 * 1000, // 1 minuto
   delayAfter: 200, // Começa a atrasar após 200 requests
   delayMs: () => 500, // Adiciona 500ms de delay por request extra
-  skip: (req) => req.originalUrl.includes('/status-metrics'), // Ignora o endpoint de status
+  skip: (req) => {
+    if (req.originalUrl.includes('/status-metrics')) return true;
+    if (process.env.NODE_ENV === 'development' && isLocalhost(req.ip)) return true;
+    return false;
+  },
 });
 
 // Limitador específico para o dashboard de status (para não consumir cota global mas evitar abuso)
@@ -228,8 +307,8 @@ app.get('/', (req, res) => {
     return res.json({
       message: 'DM-APP API - OK',
       environment: process.env.NODE_ENV || 'development',
-      docs: process.env.NODE_ENV === 'development' 
-        ? `${process.env.API_PUBLIC_BASE_URL || `http://localhost:${PORT}`}/api-docs` 
+      docs: process.env.NODE_ENV === 'development'
+        ? `${process.env.API_PUBLIC_BASE_URL || `http://localhost:${PORT}`}/api-docs`
         : 'Available only in development',
       health: '/api/v1/health',
       sse_test: process.env.ENABLE_SSE === 'true' ? '/api/stream-test' : 'disabled'
@@ -239,7 +318,7 @@ app.get('/', (req, res) => {
   // Caso contrário, retorna página HTML amigável
   const env = process.env.NODE_ENV || 'development';
   const sseEnabled = process.env.ENABLE_SSE === 'true';
-  
+
   // Format Uptime
   const uptimeSeconds = process.uptime();
   const hours = Math.floor(uptimeSeconds / 3600);
@@ -260,11 +339,11 @@ app.get('/', (req, res) => {
 
   // Prepara dados de métricas para exibição (apenas se for admin ou dev - aqui aberto para demo)
   const topIps = Object.entries(metrics.ips)
-    .sort(([,a], [,b]) => b - a)
+    .sort(([, a], [, b]) => b - a)
     .slice(0, 5); // Top 5 IPs
-    
+
   const topRoutes = Object.entries(metrics.routes)
-    .sort(([,a], [,b]) => b - a)
+    .sort(([, a], [, b]) => b - a)
     .slice(0, 5); // Top 5 Rotas
 
   const html = `
@@ -544,12 +623,12 @@ app.get('/', (req, res) => {
     </body>
     </html>
   `;
-  
+
   res.send(html);
 });
 
-// Endpoint leve para atualização via AJAX (ignorado pelo contador global, mas com proteção própria)
-app.get('/api/status-metrics', statusLimiter, (req, res) => {
+// Endpoint leve para atualização via AJAX — protegido: apenas admins podem acessar
+app.get('/api/status-metrics', statusLimiter, authenticateToken, requireRole('admin', 'master', 'masteradmin'), (req, res) => {
   // Limite de Rate Limit
   const rateLimitMax = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 300;
   const currentIp = req.ip;
@@ -562,11 +641,11 @@ app.get('/api/status-metrics', statusLimiter, (req, res) => {
   const secondsToReset = Math.ceil(timeToReset / 1000);
 
   const topIps = Object.entries(metrics.ips)
-    .sort(([,a], [,b]) => b - a)
+    .sort(([, a], [, b]) => b - a)
     .slice(0, 5);
-    
+
   const topRoutes = Object.entries(metrics.routes)
-    .sort(([,a], [,b]) => b - a)
+    .sort(([, a], [, b]) => b - a)
     .slice(0, 5);
 
   res.json({
@@ -613,10 +692,10 @@ if (process.env.ENABLE_SSE === 'true') {
     res.flushHeaders();
 
     // Envia mensagem inicial
-    res.write(`data: ${JSON.stringify({ 
-      type: 'connection', 
-      message: 'Conectado ao DM-APP SSE', 
-      time: new Date().toISOString() 
+    res.write(`data: ${JSON.stringify({
+      type: 'connection',
+      message: 'Conectado ao DM-APP SSE',
+      time: new Date().toISOString()
     })}\n\n`);
 
     const interval = setInterval(() => {
@@ -650,7 +729,7 @@ app.use('/api/public/v1/events', eventOpenRoutes);
 app.use('/api/v1/events', eventJamsRoutes);
 app.use('/api/events', eventJamsRoutes);
 app.use('/api/public/v1/events', eventJamsRoutes);
-app.use('/api/v1/uploads', uploadRoutes);
+app.use('/api/v1/uploads', uploadRouter);
 app.use('/api/v1/files', filesRoutes);
 app.use('/api/v1/financial/bank-accounts', bankAccountRoutes);
 app.use('/api/v1/financial/parties', partyRoutes);
@@ -684,6 +763,10 @@ let server;
 
 process.on('SIGTERM', () => {
   console.log('SIGTERM received, shutting down gracefully');
+  clearInterval(metricsInterval);
+  clearInterval(blocklistCleanupInterval);
+  recurrenceCronJob.stop();
+  logSyncCronJob.stop();
   if (server) {
     server.close(() => {
       console.log('Server closed');
@@ -699,11 +782,11 @@ if (process.env.NODE_ENV !== 'test') {
     if (process.env.NODE_ENV === 'development') {
       console.log(`Docs: ${process.env.API_PUBLIC_BASE_URL || `http://localhost:${PORT}`}/api-docs`);
     }
-    
+
     // Check Services Status
     const checkServices = async () => {
       console.log('\n--- Service Status ---');
-      
+
       // Upload Path
       const uploadPath = process.env.UPLOAD_PATH || './uploads';
       try {
@@ -724,8 +807,8 @@ if (process.env.NODE_ENV !== 'test') {
 
       // SSE Status
       const sseEnabled = process.env.ENABLE_SSE === 'true';
-      console.log(sseEnabled 
-        ? '✅ SSE Service: Enabled' 
+      console.log(sseEnabled
+        ? '✅ SSE Service: Enabled'
         : 'qc SSE Service: Disabled (Polling Mode Recommended)');
 
       // Firebase
@@ -733,10 +816,10 @@ if (process.env.NODE_ENV !== 'test') {
       console.log(firebaseConfigured
         ? '✅ Firebase Service: Configured'
         : '⚠️ Firebase Service: Not Configured');
-      
+
       console.log('----------------------\n');
     };
-    
+
     checkServices();
   });
 }

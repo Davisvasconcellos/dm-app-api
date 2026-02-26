@@ -1,7 +1,7 @@
 const express = require('express');
 const { body, query, validationResult } = require('express-validator');
 const { authenticateToken, requireRole, requireModule } = require('../middlewares/auth');
-const { FinancialTransaction, User, FinTag, FinCategory, FinCostCenter, Party } = require('../models');
+const { FinancialTransaction, User, FinTag, FinCategory, FinCostCenter, Party, sequelize } = require('../models');
 const { Op, Sequelize } = require('sequelize');
 const { URL } = require('url');
 
@@ -170,11 +170,17 @@ router.get(
         tags
       } = req.query;
 
+      // Define limite dinâmico baseado no plano do usuário
+      // Assumindo que planId = 1 é Free, e planId > 1 é Premium
+      // Se não houver plano (null), também aplica restrição free
+      const userPlanId = req.user.planId || 1;
+      const MAX_LIMIT = userPlanId > 1 ? 2000 : 500;
+
       // Ensure reasonable limits for pagination
       const pageNumber = Math.max(Number(page) || 1, 1);
       let limitNumber = limit;
       if (limitNumber < 1) limitNumber = 1;
-      if (limitNumber > 2000) limitNumber = 2000;
+      if (limitNumber > MAX_LIMIT) limitNumber = MAX_LIMIT;
 
       const offset = (pageNumber - 1) * limitNumber;
       const where = {};
@@ -186,7 +192,7 @@ router.get(
       if (cost_center_id) where.cost_center_id = cost_center_id;
       if (party_id) where.party_id = party_id;
       where.is_deleted = false;
-      
+
       const include = [
         {
           model: FinTag,
@@ -217,7 +223,7 @@ router.get(
         // Since it is many-to-many, typically we check if the transaction has at least one of the tags
         // However, standard Sequelize filtering on many-to-many includes can be tricky with pagination
         // A common approach is finding the transaction IDs first
-        
+
         // Let's modify the include for tags to filter
         include[0].where = {
           id_code: {
@@ -231,12 +237,12 @@ router.get(
         // Given the complexity and usual user expectation, usually "filter by tag X" means "show transactions with tag X".
         // The issue is that the `include.where` makes it an INNER JOIN, which is correct for filtering.
         // BUT, the returned `tags` array will ALSO be filtered.
-        
+
         // To fix this (return all tags but filter by some), we usually need a subquery for the `where` clause.
         // But for simplicity in this step, let's just stick to standard include filter (INNER JOIN).
         // If the user complains about missing tags in the response view, we can improve it.
       }
-      
+
       if (start_date || end_date) {
         where.due_date = {};
         if (start_date) where.due_date[Op.gte] = start_date;
@@ -375,11 +381,11 @@ router.get(
       summary.payable.pending = parseFloat(summary.payable.pending.toFixed(2));
       summary.payable.paid = parseFloat(summary.payable.paid.toFixed(2));
       summary.payable.provisioned = parseFloat(summary.payable.provisioned.toFixed(2));
-      
+
       summary.receivable.pending = parseFloat(summary.receivable.pending.toFixed(2));
       summary.receivable.paid = parseFloat(summary.receivable.paid.toFixed(2));
       summary.receivable.provisioned = parseFloat(summary.receivable.provisioned.toFixed(2));
-      
+
       summary.overdue = parseFloat(summary.overdue.toFixed(2));
       summary.total_paid = parseFloat(summary.total_paid.toFixed(2));
 
@@ -600,19 +606,26 @@ router.post(
         is_deleted: false
       };
 
-      const transaction = await FinancialTransaction.create(payload);
+      const t = await sequelize.transaction();
+      let transaction;
 
-      if (tags && Array.isArray(tags) && tags.length > 0) {
-        const tagInstances = await FinTag.findAll({
-          where: {
-            id_code: {
-              [Op.in]: tags
-            }
+      try {
+        transaction = await FinancialTransaction.create(payload, { transaction: t });
+
+        if (tags && Array.isArray(tags) && tags.length > 0) {
+          const tagInstances = await FinTag.findAll({
+            where: { id_code: { [Op.in]: tags } },
+            transaction: t
+          });
+          if (tagInstances.length > 0) {
+            await transaction.setTags(tagInstances, { transaction: t });
           }
-        });
-        if (tagInstances.length > 0) {
-          await transaction.setTags(tagInstances);
         }
+
+        await t.commit();
+      } catch (createErr) {
+        await t.rollback();
+        throw createErr;
       }
 
       await transaction.reload({
@@ -993,19 +1006,19 @@ router.patch(
           updated_by_user_id: req.user.userId
         });
 
-      await transaction.reload();
+        await transaction.reload();
 
-      const creator = await User.findByPk(transaction.created_by_user_id, {
-        attributes: ['id_code']
-      });
-      const cancelResponseAttachments = parseStoredAttachments(transaction.attachment_url);
-      const cancelResponseAttachmentUrl = buildAttachmentUrlString(cancelResponseAttachments);
+        const creator = await User.findByPk(transaction.created_by_user_id, {
+          attributes: ['id_code']
+        });
+        const cancelResponseAttachments = parseStoredAttachments(transaction.attachment_url);
+        const cancelResponseAttachmentUrl = buildAttachmentUrlString(cancelResponseAttachments);
 
-      return res.json({
-        success: true,
-        data: {
-          id_code: transaction.id_code,
-          type: transaction.type,
+        return res.json({
+          success: true,
+          data: {
+            id_code: transaction.id_code,
+            type: transaction.type,
             nf: transaction.nf,
             description: transaction.description,
             amount: parseFloat(transaction.amount),
@@ -1016,17 +1029,17 @@ router.patch(
             status: transaction.status,
             party_id: transaction.party_id,
             cost_center: transaction.cost_center,
-          category: transaction.category,
-          is_paid: transaction.is_paid,
-          payment_method: transaction.payment_method,
-          bank_account_id: transaction.bank_account_id,
-          attachment_url: cancelResponseAttachmentUrl,
-          store_id: transaction.store_id,
-          approved_by: transaction.approved_by,
-          created_by: creator ? creator.id_code : null,
-          attachments: cancelResponseAttachments
-        }
-      });
+            category: transaction.category,
+            is_paid: transaction.is_paid,
+            payment_method: transaction.payment_method,
+            bank_account_id: transaction.bank_account_id,
+            attachment_url: cancelResponseAttachmentUrl,
+            store_id: transaction.store_id,
+            approved_by: transaction.approved_by,
+            created_by: creator ? creator.id_code : null,
+            attachments: cancelResponseAttachments
+          }
+        });
       }
 
       if (is_paid && status !== 'paid') {

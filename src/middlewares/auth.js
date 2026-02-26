@@ -1,44 +1,67 @@
 // src/middlewares/auth.js
 const jwt = require('jsonwebtoken');
-const { User, TokenBlocklist } = require('../models'); // ajuste o caminho se necessário
+const { User, TokenBlocklist } = require('../models');
+
+// Cache em memória para blocklist de tokens (evita query ao banco a cada request)
+// TTL de 60 segundos: tempo máximo que um token invalidado pode ser considerado válido
+const blocklistCache = new Map();
+const BLOCKLIST_CACHE_TTL_MS = 60 * 1000; // 60 segundos
+
+const isTokenBlocked = async (token) => {
+  // Verifica cache primeiro
+  const cached = blocklistCache.get(token);
+  if (cached !== undefined) {
+    return cached;
+  }
+  // Consulta banco apenas se não estiver em cache
+  const blocked = await TokenBlocklist.findByPk(token);
+  const result = !!blocked;
+  blocklistCache.set(token, result);
+  // Remove do cache após TTL
+  setTimeout(() => blocklistCache.delete(token), BLOCKLIST_CACHE_TTL_MS);
+  return result;
+};
 
 // Middleware para validar token e popular req.user
 const authenticateToken = async (req, res, next) => {
-  console.log('Authorization header:', req.headers['authorization']);
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
   if (!token) {
-    console.log('Token não fornecido');
     return res.status(401).json({ message: 'Token não fornecido' });
   }
 
   try {
-    // Verificar se o token está na blocklist
-    const isBlocked = await TokenBlocklist.findByPk(token);
-    if (isBlocked) {
-      console.log('Token na blocklist');
+    // Verificar se o token está na blocklist (com cache em memória)
+    const blocked = await isTokenBlocked(token);
+    if (blocked) {
       return res.status(401).json({ message: 'Token inválido' });
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    console.log('Token decodificado:', decoded);
 
-    // Busca usuário no banco
-    const user = await User.findByPk(decoded.userId);
+    // Busca usuário no banco para garantir que ainda existe e está ativo
+    const user = await User.findByPk(decoded.userId, {
+      attributes: ['id', 'role', 'email', 'plan_id']
+    });
 
     if (!user) {
-      console.log('Usuário não encontrado no banco');
       return res.status(401).json({ message: 'Usuário não encontrado' });
     }
 
-    // Anexa o payload decodificado do token ao req.user
-    req.user = decoded;
+    // Popula req.user com dados frescos do banco (garante role atualizada)
+    req.user = {
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+      planId: user.plan_id
+    };
 
-    console.log('Usuário autenticado:', req.user);
     next();
   } catch (err) {
-    console.error('Erro no token:', err.message);
+    if (process.env.NODE_ENV === 'development') {
+      console.error('Erro no token:', err.message);
+    }
     return res.status(403).json({ message: 'Token inválido ou expirado' });
   }
 };
@@ -47,7 +70,6 @@ const authenticateToken = async (req, res, next) => {
 const requireRole = (...roles) => {
   return (req, res, next) => {
     if (!req.user) {
-      console.log('Requisição sem usuário autenticado');
       return res.status(401).json({ message: 'Não autenticado' });
     }
 
@@ -61,11 +83,9 @@ const requireRole = (...roles) => {
       return next();
     }
 
-    console.log('Acesso negado para role:', req.user.role);
     return res.status(403).json({ 
       error: 'Forbidden',
-      message: `Acesso negado. Seu perfil (${req.user.role}) não possui permissão para este recurso.`,
-      required_roles: [...roles, ...highPrivilegeRoles]
+      message: `Acesso negado. Seu perfil não possui permissão para este recurso.`
     });
   };
 };
@@ -100,10 +120,12 @@ const requireModule = (moduleSlug) => {
 
       return res.status(403).json({ 
         error: 'Forbidden',
-        message: `Acesso negado. Seu usuário (role: ${req.user.role}) não possui o módulo '${moduleSlug}' ativo.` 
+        message: `Acesso negado. Módulo '${moduleSlug}' não está disponível para seu usuário.`
       });
     } catch (error) {
-      console.error('Erro ao verificar permissão de módulo:', error);
+      if (process.env.NODE_ENV === 'development') {
+        console.error('Erro ao verificar permissão de módulo:', error);
+      }
       return res.status(500).json({ message: 'Erro interno de verificação de permissão' });
     }
   };

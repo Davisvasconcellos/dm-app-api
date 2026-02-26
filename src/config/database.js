@@ -12,9 +12,9 @@ const sequelize = new Sequelize(
     dialect: 'mysql',
     logging: process.env.DB_LOGGING === 'true' ? console.log : false,
     pool: {
-      max: 5,
-      min: 0,
-      acquire: 30000,
+      max: parseInt(process.env.DB_POOL_MAX) || 15,
+      min: parseInt(process.env.DB_POOL_MIN) || 2,
+      acquire: 10000,
       idle: 10000
     },
     define: {

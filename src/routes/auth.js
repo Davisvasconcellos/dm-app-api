@@ -4,56 +4,11 @@ const { body, validationResult } = require('express-validator');
 const { Op } = require('sequelize');
 const { User, Plan, TokenBlocklist, FootballTeam } = require('../models');
 const { authenticateToken } = require('../middlewares/auth');
-const admin = require('firebase-admin');
-
-// Firebase Admin initialization (supports Application Default or JSON from env)
-// if (!admin.apps.length) {
-//   try {
-//     if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-//       const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-//       admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-//     } else {
-//       admin.initializeApp({ credential: admin.credential.applicationDefault() });
-//     }
-//   } catch (err) {
-//     console.error('Firebase Admin initialization error:', err);
-//   }
-// }
-
-// Firebase Admin initialization
-if (!admin.apps.length) {
-  try {
-    let initialized = false;
-
-    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-      admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-      initialized = true;
-    } else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
-      const pk = process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n');
-      const serviceAccount = {
-        project_id: process.env.FIREBASE_PROJECT_ID,
-        projectId: process.env.FIREBASE_PROJECT_ID,
-        client_email: process.env.FIREBASE_CLIENT_EMAIL,
-        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        private_key: pk,
-        privateKey: pk,
-      };
-      admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-      initialized = true;
-    }
-
-    if (!initialized) {
-      admin.initializeApp({ credential: admin.credential.applicationDefault() });
-    }
-    console.log('Firebase Admin inicializado com sucesso');
-  } catch (err) {
-    console.error('Erro ao inicializar Firebase Admin:', err.message);
-  }
-}
+const admin = require('../config/firebaseAdmin');
 
 
 
+const crypto = require('crypto');
 
 const router = express.Router();
 
@@ -243,7 +198,7 @@ router.post('/google', [
 
         user = await User.findOne({ where: { id: userByEmail.id }, include });
       } else {
-        const randomPassword = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+        const randomPassword = crypto.randomBytes(32).toString('hex');
         const created = await User.create({
           name: name || (email ? email.split('@')[0] : 'Usuário Google'),
           email,
