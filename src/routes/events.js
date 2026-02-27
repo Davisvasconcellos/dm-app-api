@@ -5,6 +5,7 @@ const { sequelize } = require('../config/database');
 const { Op, fn, col } = require('sequelize');
 const { Event, EventQuestion, EventResponse, EventAnswer, User, EventGuest, TokenBlocklist } = require('../models');
 const jwt = require('jsonwebtoken');
+const { incrementMetric } = require('../utils/requestContext');
 
 const router = express.Router();
 
@@ -516,10 +517,27 @@ router.get('/', authenticateToken, requireRole('admin', 'master'), requireModule
  *       404:
  *         description: Evento não encontrado
  */
+// Simple in-memory cache for event details to reduce DB pressure
+const EVENT_DETAIL_CACHE_TTL = 30000; // 30 seconds for easier dev testing
+const eventDetailCache = new Map();
+
 // GET /api/v1/events/:id - Detalhes do evento + perguntas ordenadas + total_responses
 router.get('/:id', authenticateToken, requireRole('admin', 'master'), requireModule('events'), async (req, res) => {
   try {
     const { id } = req.params;
+    const cacheKey = `detail-${id}`;
+
+    // Check cache
+    const cached = eventDetailCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp < EVENT_DETAIL_CACHE_TTL)) {
+      if (process.env.NODE_ENV === 'development') console.log(`[EventCache] HIT! Key: ${cacheKey}`);
+      incrementMetric('cacheHits');
+      const globalMetrics = req.app.get('metrics');
+      if (globalMetrics) globalMetrics.cacheHits++;
+      return res.json(cached.data);
+    } else {
+      if (process.env.NODE_ENV === 'development') console.log(`[EventCache] MISS. Key: ${cacheKey}`);
+    }
 
     const event = await Event.findOne({
       where: { id_code: id },
@@ -541,7 +559,16 @@ router.get('/:id', authenticateToken, requireRole('admin', 'master'), requireMod
 
     const total_responses = await EventResponse.count({ where: { event_id: event.id } });
 
-    return res.json({ success: true, data: { event: sanitizeEvent(event), total_responses } });
+    const responseData = { success: true, data: { event: sanitizeEvent(event), total_responses } };
+
+    // Save to cache
+    eventDetailCache.set(cacheKey, {
+      data: responseData,
+      timestamp: Date.now()
+    });
+    if (process.env.NODE_ENV === 'development') console.log(`[EventCache] SAVED! Key: ${cacheKey}`);
+
+    return res.json(responseData);
   } catch (error) {
     console.error('Get event error:', error);
     return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });

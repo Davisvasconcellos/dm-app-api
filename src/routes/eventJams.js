@@ -5,6 +5,8 @@ const jwt = require('jsonwebtoken');
 const { Op } = require('sequelize');
 const { Event, EventJam, EventJamSong, EventJamSongInstrumentSlot, EventJamSongCandidate, EventJamSongRating, EventGuest, User, EventJamMusicCatalog } = require('../models');
 const discogsService = require('../services/discogsService');
+const { incrementMetric } = require('../utils/requestContext');
+const { jamsCache, clearJamsCache, JAMS_CACHE_TTL } = require('../utils/cacheManager');
 
 const router = express.Router();
 
@@ -46,13 +48,29 @@ router.get('/:id/jams/:jamId/stream', (req, res) => {
   });
 });
 
+// Caches were moved to src/utils/cacheManager.js for cross-route invalidation
+
 router.get('/:id/jams', authenticateToken, async (req, res) => {
+try {
   const { id } = req.params;
+  const onlyReal = String(req.query.only_real || 'false').toLowerCase() === 'true';
+  const cacheKey = `${id}-${onlyReal}`;
+  
+  // Check cache
+  const cached = jamsCache.get(cacheKey);
+  if (cached && (Date.now() - cached.timestamp < JAMS_CACHE_TTL)) {
+    if (process.env.NODE_ENV === 'development') console.log(`[JamsCache] HIT! Key: ${cacheKey}`);
+    const globalMetrics = req.app.get('metrics');
+    if (globalMetrics) globalMetrics.cacheHits++;
+    incrementMetric('cacheHits'); // HUD v2 visibility
+    return res.json(cached.data);
+  } else {
+    if (process.env.NODE_ENV === 'development') console.log(`[JamsCache] MISS. Key: ${cacheKey}`);
+  }
+
   const event = await Event.findOne({ where: { id_code: id } });
   if (!event) return res.status(404).json({ error: 'Not Found', message: 'Evento não encontrado' });
-  // Permissão relaxada para permitir convidados verem as jams
-  // if (req.user.role !== 'master' && event.created_by !== req.user.userId) return res.status(403).json({ error: 'Access denied' });
-  const onlyReal = String(req.query.only_real || 'false').toLowerCase() === 'true';
+  
   const jams = await EventJam.findAll({
     where: { event_id: event.id },
     include: [{
@@ -67,6 +85,7 @@ router.get('/:id/jams', authenticateToken, async (req, res) => {
       ]
     }]
   });
+  
   const data = jams.map(j => {
     const songs = (j.songs || []).slice().sort((a, b) => (a.order_index || 0) - (b.order_index || 0)).map(s => {
       const byInstrument = {};
@@ -100,7 +119,39 @@ router.get('/:id/jams', authenticateToken, async (req, res) => {
     });
     return { id: j.id_code, event_id: event.id_code, name: j.name, slug: j.slug, status: j.status, notes: j.notes, order_index: j.order_index, songs };
   });
-  return res.json({ success: true, data });
+
+  const responseData = { success: true, data };
+  
+  // Save to cache
+  jamsCache.set(cacheKey, {
+    data: responseData,
+    timestamp: Date.now()
+  });
+  if (process.env.NODE_ENV === 'development') console.log(`[JamsCache] SAVED! Key: ${cacheKey}`);
+
+  // Set Cache-Control header to no-store/private for admins to ensure real-time behavior in Kanban
+  res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate');
+  
+  return res.json(responseData);
+} catch (err) {
+  // Failover to Cache: se o banco falhar, tenta retornar o que temos na memória (mesmo que velho)
+  const onlyReal = String(req.query.only_real || 'false').toLowerCase() === 'true';
+  const cacheKey = `${req.params.id}-${onlyReal}`;
+  const stale = jamsCache.get(cacheKey);
+  
+  if (stale) {
+    const globalMetrics = req.app.get('metrics');
+    if (globalMetrics) globalMetrics.dbErrors++;
+    incrementMetric('cacheHits'); // Acumula como hit se serviu failover
+    console.warn(`[FAILOVER] Servindo cache antigo para /jams devido a erro: ${err.message}`);
+    res.setHeader('X-Cache-Failover', 'true');
+    return res.json(stale.data);
+  }
+  
+  // Se não tiver nem no cache, aí sim retorna erro
+  console.error(`[CRITICAL] Rota /jams falhou sem cache: ${err.message}`);
+  return res.status(500).json({ error: 'Database Error', message: 'Erro ao carregar Jams' });
+}
 });
 
 router.get('/:id/jams/songs', authenticateToken, requireRole('admin', 'master'), async (req, res) => {
@@ -196,6 +247,7 @@ router.post('/:id/jams', authenticateToken, requireRole('admin', 'master'), [
     }
 
     const jam = await EventJam.create({ event_id: event.id, name, slug, notes: notes || null, status: status || 'active', order_index: order_index || 0 });
+    clearJamsCache(id);
     return res.status(201).json({ success: true, data: { id: jam.id_code, event_id: event.id_code, name: jam.name, slug: jam.slug, status: jam.status, notes: jam.notes, order_index: jam.order_index } });
   } catch (err) {
     if (err.name === 'SequelizeUniqueConstraintError') {
@@ -227,6 +279,7 @@ router.post('/:id/jams/:jamId/songs', authenticateToken, requireRole('admin', 'm
   }
 
   emitEvent(id, jam.id_code, 'song_created', { song_id: song.id_code });
+  clearJamsCache(id);
   return res.status(201).json({ success: true, data: { ...song.toJSON(), id: song.id_code, jam_id: jam.id_code, id_code: undefined } });
 });
 
@@ -395,6 +448,7 @@ router.post('/:id/jams/songs', authenticateToken, requireRole('admin', 'master')
        }
 
       await tx.commit();
+      clearJamsCache(id);
 
       if (Array.isArray(instrument_slots) && instrument_slots.length) {
         emitEvent(id, jam.id_code, 'instrument_slots_updated', { song_id: song.id_code });
@@ -475,6 +529,7 @@ router.post('/:id/jams/:jamId/songs/:songId/instrument-slots', authenticateToken
       await EventJamSongInstrumentSlot.create({ jam_song_id: song.id, instrument: s.instrument, slots: s.slots || 1, required: s.required !== undefined ? !!s.required : true, fallback_allowed: s.fallback_allowed !== undefined ? !!s.fallback_allowed : true }, { transaction: tx });
     }
     await tx.commit();
+    clearJamsCache(id);
     emitEvent(id, jamId, 'instrument_slots_updated', { song_id: song.id_code });
     return res.json({ success: true });
   } catch (e) {
@@ -509,6 +564,7 @@ router.put('/:id/jams/:jamId/songs/:songId', authenticateToken, requireRole('adm
   });
 
   emitEvent(id, jamId, 'song_updated', { song_id: song.id_code });
+  clearJamsCache(id);
   return res.json({ success: true, data: { ...song.toJSON(), id: song.id_code, jam_id: jam.id_code, id_code: undefined } });
 });
 
@@ -531,6 +587,7 @@ router.post('/:id/jams/:jamId/songs/release', authenticateToken, requireRole('ad
     const currentOpen = await EventJamSong.count({ where: { jam_id: jam.id, status: 'open_for_candidates' } });
     if (currentOpen + numericIds.length > maxOpen) return res.status(400).json({ error: 'Validation error', message: 'Limite de músicas abertas excedido' });
     await EventJamSong.update({ status: 'open_for_candidates' }, { where: { id: { [Op.in]: numericIds }, jam_id: jam.id } });
+    clearJamsCache(id);
     emitEvent(id, jamId, 'songs_opened', { song_ids: foundIdCodes });
   } else if (action === 'close') {
     await EventJamSong.update({ status: 'planned', ready: false }, { where: { id: { [Op.in]: numericIds }, jam_id: jam.id } });
@@ -551,6 +608,7 @@ router.post('/:id/jams/:jamId/songs/release', authenticateToken, requireRole('ad
       }
     }
     emitEvent(id, jamId, 'songs_closed', { song_ids: foundIdCodes });
+    clearJamsCache(id);
   } else {
     return res.status(400).json({ error: 'Validation error', message: 'Ação inválida' });
   }
@@ -768,6 +826,7 @@ router.post('/:id/jams/:jamId/songs/:songId/apply', authenticateToken, [
   if (exists) return res.status(409).json({ error: 'Duplicate entry', message: 'Já candidatado' });
   const created = await EventJamSongCandidate.create({ jam_song_id: song.id, instrument, event_guest_id: guest.id, status: 'pending' });
   emitEvent(id, jamId, 'candidate_applied', { song_id: song.id_code, instrument });
+  clearJamsCache(id);
   return res.status(201).json({ success: true, data: { ...created.toJSON(), id: created.id_code, jam_song_id: song.id_code, event_guest_id: guest.id_code, id_code: undefined } });
 });
 
@@ -787,6 +846,7 @@ router.post('/:id/jams/:jamId/songs/:songId/candidates/:candidateId/approve', au
   if (approvedCount >= (slot.slots || 1)) return res.status(400).json({ error: 'Validation error', message: 'Vagas preenchidas' });
   await candidate.update({ status: 'approved', approved_at: new Date(), approved_by_user_id: req.user.userId });
   emitEvent(id, jamId, 'candidate_approved', { song_id: song.id_code, instrument: candidate.instrument });
+  clearJamsCache(id);
   return res.json({ success: true });
 });
 
@@ -802,6 +862,7 @@ router.post('/:id/jams/:jamId/songs/:songId/candidates/:candidateId/reject', aut
   if (!candidate) return res.status(404).json({ error: 'Not Found', message: 'Candidato não encontrado' });
   await candidate.update({ status: 'rejected' });
   emitEvent(id, jamId, 'candidate_rejected', { song_id: song.id_code, instrument: candidate.instrument });
+  clearJamsCache(id);
   return res.json({ success: true });
 });
 
@@ -829,6 +890,7 @@ router.post('/:id/jams/:jamId/songs/:songId/move', authenticateToken, requireRol
     await song.update({ status: 'canceled' });
   }
   emitEvent(id, jamId, 'song_status_changed', { song_id: song.id_code, status });
+  clearJamsCache(id);
   return res.json({ success: true });
 });
 
@@ -856,6 +918,7 @@ router.patch('/:id/jams/:jamId/songs/:songId/status', authenticateToken, require
     await song.update({ status: 'canceled' });
   }
   emitEvent(id, jamId, 'song_status_changed', { song_id: song.id_code, status });
+  clearJamsCache(id);
   return res.json({ success: true });
 });
 
@@ -875,6 +938,7 @@ router.patch('/:id/jams/:jamId/songs/:songId/ready', authenticateToken, requireR
   if (song.status !== 'open_for_candidates') return res.status(400).json({ error: 'Validation error', message: 'Toggle permitido apenas em open_for_candidates' });
   await song.update({ ready: !!ready });
   emitEvent(id, jamId, 'song_ready_changed', { song_id: song.id_code, ready: !!ready });
+  clearJamsCache(id);
   return res.json({ success: true });
 });
 
@@ -917,6 +981,7 @@ router.patch('/:id/jams/:jamId/songs/order', authenticateToken, requireRole('adm
   }
 
   emitEvent(id, jamId, 'song_order_changed', { status, ordered_ids });
+  clearJamsCache(id);
   return res.json({ success: true });
 });
 
@@ -984,6 +1049,7 @@ router.delete('/:id/jams/:jamId/songs/:songId', authenticateToken, requireRole('
   
   emitEvent(id, jamId, 'song_deleted', { song_id: songId });
   emitEvent(id, jamId, 'song_order_changed', { status, ordered_ids: rest.map(s => s.id_code) });
+  clearJamsCache(id);
   return res.json({ success: true });
 });
 
@@ -1007,6 +1073,7 @@ router.post('/:id/jams/:jamId/songs/:songId/rate', authenticateToken, [
   const aggregate = await EventJamSongRating.findAll({ where: { jam_song_id: song.id } });
   const avg = aggregate.length ? (aggregate.reduce((a, r) => a + r.stars, 0) / aggregate.length) : 0;
   emitEvent(id, jamId, 'rating_summary_updated', { song_id: song.id_code, average: Number(avg.toFixed(2)), count });
+  clearJamsCache(id);
   return res.json({ success: true });
 });
 

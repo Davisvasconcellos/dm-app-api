@@ -7,6 +7,10 @@ const { User, TokenBlocklist } = require('../models');
 const blocklistCache = new Map();
 const BLOCKLIST_CACHE_TTL_MS = 60 * 1000; // 60 segundos
 
+// Cache em memória para usuários (evita consulta ao banco em cada request autenticada)
+const userCache = new Map();
+const USER_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutos
+
 const isTokenBlocked = async (token) => {
   // Verifica cache primeiro
   const cached = blocklistCache.get(token);
@@ -40,6 +44,13 @@ const authenticateToken = async (req, res, next) => {
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
+    // Verifica cache de usuário primeiro
+    const cachedUser = userCache.get(decoded.userId);
+    if (cachedUser && (Date.now() - cachedUser.timestamp < USER_CACHE_TTL_MS)) {
+      req.user = cachedUser.data;
+      return next();
+    }
+
     // Busca usuário no banco para garantir que ainda existe e está ativo
     const user = await User.findByPk(decoded.userId, {
       attributes: ['id', 'role', 'email', 'plan_id']
@@ -50,12 +61,28 @@ const authenticateToken = async (req, res, next) => {
     }
 
     // Popula req.user com dados frescos do banco (garante role atualizada)
-    req.user = {
+    const userData = {
       userId: user.id,
       email: user.email,
       role: user.role,
       planId: user.plan_id
     };
+
+    // Salva no cache
+    userCache.set(decoded.userId, {
+      data: userData,
+      timestamp: Date.now()
+    });
+
+    // Limpeza automática do cache (opcional, Map.delete no lookup já resolve, mas evita vazamento se o user sumir)
+    setTimeout(() => {
+      const entry = userCache.get(decoded.userId);
+      if (entry && Date.now() - entry.timestamp >= USER_CACHE_TTL_MS) {
+        userCache.delete(decoded.userId);
+      }
+    }, USER_CACHE_TTL_MS);
+
+    req.user = userData;
 
     next();
   } catch (err) {

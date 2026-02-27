@@ -3,6 +3,8 @@ const { body, validationResult } = require('express-validator');
 const { authenticateToken, requireModule } = require('../middlewares/auth');
 const { Op } = require('sequelize');
 const { EventJamMusicSuggestion, EventJamMusicSuggestionParticipant, User, EventJam, EventJamSong, EventJamSongInstrumentSlot, EventJamSongCandidate, EventGuest, Event, EventJamMusicCatalog } = require('../models');
+const { incrementMetric } = require('../utils/requestContext');
+const { suggestionsCache, clearSuggestionsCache, clearJamsCache, SUGGESTIONS_CACHE_TTL } = require('../utils/cacheManager');
 
 const router = express.Router();
 
@@ -80,13 +82,28 @@ router.get('/friends', authenticateToken, requireModule('events'), async (req, r
  * Query Params:
  *  - event_id: UUID do evento (obrigatório)
  */
+// Caches were moved to src/utils/cacheManager.js for cross-route invalidation
+
 router.get('/', authenticateToken, requireModule('events'), async (req, res) => {
   try {
     const userId = req.user.userId;
-    const { event_id } = req.query;
+    const { event_id, status } = req.query;
 
     if (!event_id) {
       return res.status(400).json({ error: 'Validation Error', message: 'event_id é obrigatório' });
+    }
+
+    // Cache key includes status and user role/ID to ensure correct permissions are cached
+    const isSpecialRole = ['admin', 'master'].includes(req.user.role);
+    const cacheKey = `${event_id}-${status || 'default'}-${isSpecialRole ? 'admin' : userId}`;
+
+    // Check cache
+    const cached = suggestionsCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp < SUGGESTIONS_CACHE_TTL)) {
+      const globalMetrics = req.app.get('metrics');
+      if (globalMetrics) globalMetrics.cacheHits++;
+      incrementMetric('cacheHits'); // HUD v2 visibility
+      return res.json(cached.data);
     }
 
     const event = await Event.findOne({ where: { id_code: event_id } });
@@ -101,19 +118,12 @@ router.get('/', authenticateToken, requireModule('events'), async (req, res) => 
 
     // Se for Admin ou Master, permite ver sugestões SUBMITTED (para aprovação)
     // ou filtrar por status via query param
-    if (['admin', 'master'].includes(req.user.role)) {
-      const { status } = req.query;
-      
+    if (isSpecialRole) {
       if (status && status !== 'ALL') {
         whereClause.status = status;
       } else if (!status) {
-        // Por padrão, se não especificar status, admin vê as que precisam de atenção (SUBMITTED)
-        // Mas se quiser ver todas (incluindo DRAFT dos outros? talvez não DRAFT), 
-        // vamos definir que por padrão admin vê SUBMITTED se não passar nada.
-        // Se passar status=ALL, vê tudo.
         whereClause.status = 'SUBMITTED';
       }
-      // Nota: Admin não tem filtro de user_id, vê de todos
     } else {
       // Usuário comum: vê apenas as suas (criador ou participante)
       whereClause[Op.or] = [
@@ -177,9 +187,34 @@ router.get('/', authenticateToken, requireModule('events'), async (req, res) => 
       };
     });
 
-    return res.json({ success: true, data });
+    const responseData = { success: true, data };
+
+    // Save to cache
+    suggestionsCache.set(cacheKey, {
+      data: responseData,
+      timestamp: Date.now()
+    });
+
+    // Set Cache-Control header for 10 seconds (private for safety)
+    res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate');
+
+    return res.json(responseData);
   } catch (error) {
-    console.error(error);
+    // Failover to Cache: se o banco falhar, tenta retornar o que temos na memória (mesmo que velho)
+    const isSpecialRole = ['admin', 'master'].includes(req.user.role);
+    const cacheKey = `${req.query.event_id}-${req.query.status || 'default'}-${isSpecialRole ? 'admin' : req.user.userId}`;
+    const stale = suggestionsCache.get(cacheKey);
+    
+    if (stale) {
+      const globalMetrics = req.app.get('metrics');
+      if (globalMetrics) globalMetrics.dbErrors++;
+      incrementMetric('cacheHits'); 
+      console.warn(`[FAILOVER] Servindo cache antigo para /music-suggestions devido a erro: ${error.message}`);
+      res.setHeader('X-Cache-Failover', 'true');
+      return res.json(stale.data);
+    }
+    
+    console.error(`[CRITICAL] Rota /music-suggestions falhou sem cache: ${error.message}`);
     return res.status(500).json({ error: 'Internal Server Error', message: error.message });
   }
 });
@@ -273,6 +308,7 @@ router.post('/',
       }
 
       await transaction.commit();
+      clearSuggestionsCache(event_id);
 
       // Recarregar com associações para retorno
       const fullSuggestion = await EventJamMusicSuggestion.findByPk(suggestion.id, {
@@ -330,6 +366,7 @@ router.put('/:id',
       }
 
       await suggestion.update(req.body);
+      clearSuggestionsCache(suggestion.event_id_code || id);
 
       return res.json({ success: true, data: suggestion });
     } catch (error) {
@@ -366,6 +403,7 @@ router.post('/:id/reject', authenticateToken, requireModule('events'), async (re
 
     suggestion.status = 'REJECTED';
     await suggestion.save();
+    clearSuggestionsCache(suggestion.event_id_code || id);
 
     return res.json({ success: true, message: 'Sugestão rejeitada com sucesso', data: suggestion });
   } catch (error) {
@@ -395,6 +433,7 @@ router.delete('/:id', authenticateToken, requireModule('events'), async (req, re
     }
 
     await suggestion.destroy();
+    clearSuggestionsCache(suggestion.event_id_code || id);
     return res.json({ success: true, message: 'Sugestão excluída com sucesso' });
   } catch (error) {
     return res.status(500).json({ error: 'Internal Server Error', message: error.message });
@@ -437,6 +476,7 @@ router.post('/:id/submit', authenticateToken, requireModule('events'), async (re
 
     suggestion.status = 'SUBMITTED';
     await suggestion.save();
+    clearSuggestionsCache(suggestion.event_id_code || id);
 
     return res.json({ success: true, data: suggestion, message: 'Sugestão enviada para aprovação!' });
 
@@ -568,6 +608,8 @@ router.patch('/:id/participants/me/status',
 
       participant.status = status;
       await participant.save();
+      clearSuggestionsCache(suggestion.event_id_code || id);
+      clearSuggestionsCache(suggestion.event_id_code || id);
 
       return res.json({ success: true, data: participant });
 
@@ -761,6 +803,14 @@ router.post('/:id/approve',
         await suggestion.save({ transaction });
 
         await transaction.commit();
+
+        // IMPORTANTE: Invalida o cache do Kanban (Jams) e de Sugestões
+        // Agora que o cache é centralizado, podemos limpar de qualquer rota!
+        const eventIdCode = suggestion.event_id_code || targetJam.event_id_code;
+        if (eventIdCode) {
+          clearJamsCache(eventIdCode);
+          clearSuggestionsCache(eventIdCode);
+        }
 
         return res.json({ 
           success: true, 

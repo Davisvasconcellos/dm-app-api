@@ -1,5 +1,6 @@
 // Load base .env first
 require('dotenv').config();
+const { requestContext } = require('./utils/requestContext');
 const fs = require('fs');
 const path = require('path');
 
@@ -136,21 +137,85 @@ app.use(compression({ filter: shouldCompress }));
 // Ajustado para eventos: 300 reqs/min por IP (suporta ~200 usuários simultâneos intensos)
 
 // Middleware de monitoramento de requisições por IP (Debug)
-// Variável global para armazenar métricas
+// Estrutura de métricas melhorada para o HUD v2 (Acumulado por Hora)
 const metrics = {
-  ips: {},
-  routes: {},
   totalRequests: 0,
-  startTime: Date.now()
+  dbQueries: 0,
+  cacheHits: 0,
+  dbErrors: 0,
+  startTime: Date.now(),
+  ips: {},    // { 'ip': { total: 0, db: 0, cache: 0, routes: {} } }
+  routes: {}  // { 'METHOD /path': { total: 0, db: 0, cache: 0 } }
 };
 
-// Limpa contadores a cada minuto (referência guardada para graceful shutdown)
+// Limpa contadores TODO INÍCIO DE HORA (ex: 14:00:00)
 const metricsInterval = setInterval(() => {
-  metrics.ips = {};
-  metrics.routes = {};
-  metrics.totalRequests = 0;
-  metrics.startTime = Date.now();
-}, 60000);
+  const now = new Date();
+  if (now.getMinutes() === 0 && now.getSeconds() < 10) { 
+    metrics.ips = {};
+    metrics.routes = {};
+    metrics.totalRequests = 0;
+    metrics.cacheHits = 0;
+    metrics.dbErrors = 0;
+    metrics.startTime = Date.now();
+    if (sequelize) sequelize.dbQueries = 0;
+    console.log(`[Monitor] Contadores zerados em ${now.toISOString()}. Próximo em 1h.`);
+  }
+}, 10000); 
+
+app.set('metrics', metrics);
+
+// Middleware HUD v2: AsyncLocalStorage + Acumulador Hourly
+app.use((req, res, next) => {
+  if (req.path === '/api/status-metrics' || req.path === '/favicon.ico' || req.path.startsWith('/swagger')) return next();
+
+  const ip = req.ip;
+  const routeKey = `${req.method} ${req.path.substring(0, 40)}`; // Trunca rotas longas
+
+  // Inicializa contexto para rastrear queries desta request específica
+  const store = { dbQueries: 0, cacheHits: 0, ip, routeKey };
+
+  requestContext.run(store, () => {
+    metrics.totalRequests++;
+    
+    // Atualiza acumulado por Rota
+    if (!metrics.routes[routeKey]) metrics.routes[routeKey] = { total: 0, db: 0, cache: 0 };
+    metrics.routes[routeKey].total++;
+
+    // Atualiza acumulado por IP
+    if (!metrics.ips[ip]) metrics.ips[ip] = { total: 0, db: 0, cache: 0, routes: {} };
+    metrics.ips[ip].total++;
+    if (!metrics.ips[ip].routes[routeKey]) metrics.ips[ip].routes[routeKey] = 0;
+    metrics.ips[ip].routes[routeKey]++;
+
+    // Ao terminar a request (finish), soma as queries atribuídas no acumulado geral das métricas
+    res.on('finish', () => {
+      const finalStore = requestContext.getStore() || store;
+      
+      // Update global metrics from specific request findings
+      if (metrics.routes[routeKey]) {
+        metrics.routes[routeKey].db += finalStore.dbQueries;
+        metrics.routes[routeKey].cache += finalStore.cacheHits;
+      }
+      if (metrics.ips[ip]) {
+        metrics.ips[ip].db += finalStore.dbQueries;
+        metrics.ips[ip].cache += finalStore.cacheHits;
+      }
+
+      // Sincroniza o total global de Cache Hits para o KPI do HUD
+      metrics.cacheHits += finalStore.cacheHits;
+      
+      if (finalStore.cacheHits > 0 && process.env.NODE_ENV === 'development') {
+        console.log(`[HUD Sync] Sincronizando ${finalStore.cacheHits} hits para ${routeKey}. Total global: ${metrics.cacheHits}`);
+      }
+      
+      // Global cache hits needs to be incremented too if the route didn't do it manually
+      // This is a safety net
+    });
+
+    next();
+  });
+});
 
 // Limpeza automática de tokens expirados da blocklist (a cada 1 hora)
 // Evita crescimento indefinido da tabela token_blocklists
@@ -211,27 +276,7 @@ const logSyncCronJob = cron.schedule('0 */2 * * *', async () => {
   }
 });
 
-if (process.env.NODE_ENV === 'development') {
-  app.use((req, res, next) => {
-    // Ignora requisições de métricas para não poluir os dados
-    if (req.path === '/api/status-metrics') return next();
-
-    const ip = req.ip;
-    metrics.totalRequests++;
-
-    // Contagem por IP
-    metrics.ips[ip] = (metrics.ips[ip] || 0) + 1;
-
-    // Contagem por Rota (agrupa por método e path genérico)
-    const routeKey = `${req.method} ${req.path}`;
-    metrics.routes[routeKey] = (metrics.routes[routeKey] || 0) + 1;
-
-    if (metrics.ips[ip] % 10 === 0) { // Loga a cada 10 requisições
-      console.log(`[DEBUG RATE] IP: ${ip} | Reqs/Min: ${metrics.ips[ip]} | Rota: ${req.method} ${req.originalUrl}`);
-    }
-    next();
-  });
-}
+// Middleware de monitoramento movido para o topo
 
 const isLocalhost = (ip) => ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
 
@@ -346,279 +391,256 @@ app.get('/', (req, res) => {
     .sort(([, a], [, b]) => b - a)
     .slice(0, 5); // Top 5 Rotas
 
+  // Prepara dados formatados para a tabela
+  const sortedRoutes = Object.entries(metrics.routes)
+    .sort(([, a], [, b]) => b.total - a.total)
+    .slice(0, 10);
+
+  const sortedIps = Object.entries(metrics.ips)
+    .sort(([, a], [, b]) => b.total - a.total)
+    .slice(0, 8);
+
   const html = `
     <!DOCTYPE html>
     <html lang="pt-BR">
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>DM-APP API | Status</title>
+      <title>DM-APP HUD | Status por Hora</title>
       <style>
+        :root {
+          --primary: #6366f1;
+          --success: #10b981;
+          --warning: #f59e0b;
+          --danger: #ef4444;
+          --bg: #f8fafc;
+          --card: #ffffff;
+          --text: #1e293b;
+        }
         body {
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-          background-color: #f0f2f5;
+          font-family: 'Inter', system-ui, -apple-system, sans-serif;
+          background-color: var(--bg);
+          color: var(--text);
+          margin: 0;
+          padding: 20px;
           display: flex;
           justify-content: center;
-          align-items: center;
-          min-height: 100vh;
-          margin: 0;
-          color: #333;
-          padding: 20px;
         }
-        .container {
-          background: white;
-          padding: 2rem 3rem;
-          border-radius: 12px;
-          box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-          text-align: center;
-          max-width: 600px;
+        .hud-container {
+          max-width: 900px;
           width: 100%;
         }
-        .status-dot {
-          height: 12px;
-          width: 12px;
-          background-color: #10b981;
-          border-radius: 50%;
-          display: inline-block;
-          margin-right: 8px;
-          box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.2);
+        .header {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-end;
+          margin-bottom: 2rem;
         }
-        h1 { margin-bottom: 0.5rem; color: #1f2937; }
-        p.subtitle { color: #6b7280; margin-top: 0; margin-bottom: 2rem; }
-        .grid {
-          display: grid;
-          grid-template-columns: 1fr;
-          gap: 1rem;
-          text-align: left;
-          background: #f9fafb;
-          padding: 1.5rem;
-          border-radius: 8px;
-          border: 1px solid #e5e7eb;
-        }
-        .item { display: flex; justify-content: space-between; font-size: 0.95rem; }
-        .label { color: #4b5563; font-weight: 500; }
-        .value { font-family: monospace; color: #6366f1; background: #eef2ff; padding: 2px 6px; border-radius: 4px; }
-        .footer { margin-top: 2rem; font-size: 0.85rem; color: #9ca3af; }
-        a { color: #4f46e5; text-decoration: none; font-weight: 500; }
-        a:hover { text-decoration: underline; }
+        .header-left h1 { margin: 0; font-size: 1.5rem; color: #0f172a; }
+        .header-left p { margin: 4px 0 0; color: #64748b; font-size: 0.875rem; }
         
-        .metrics-section {
-          margin-top: 1.5rem;
-          text-align: left;
-          border-top: 1px solid #e5e7eb;
-          padding-top: 1rem;
+        /* Stats Cards */
+        .kpi-grid {
+          display: grid;
+          grid-template-columns: repeat(3, 1fr);
+          gap: 1rem;
+          margin-bottom: 2rem;
         }
-        .metrics-title {
-          font-size: 0.9rem;
-          font-weight: 600;
-          color: #374151;
-          margin-bottom: 0.5rem;
+        .kpi-card {
+          background: var(--card);
+          padding: 1.25rem;
+          border-radius: 12px;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+          border: 1px solid #e2e8f0;
+        }
+        .kpi-label { font-size: 0.75rem; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.025em; }
+        .kpi-value { font-size: 1.75rem; font-weight: 700; margin-top: 4px; display: flex; align-items: baseline; gap: 8px; }
+        .kpi-sub { font-size: 0.75rem; font-weight: 400; color: #94a3b8; }
+
+        /* System Info Card */
+        .info-card {
+          background: #f1f5f9;
+          padding: 10px 15px;
+          border-radius: 8px;
+          font-size: 0.75rem;
+          display: flex;
+          gap: 20px;
+          color: #475569;
+        }
+        .info-tag { font-weight: 600; color: var(--primary); }
+
+        /* Tables & Sections */
+        .section {
+          background: var(--card);
+          border-radius: 12px;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+          border: 1px solid #e2e8f0;
+          margin-bottom: 1.5rem;
+          overflow: hidden;
+        }
+        .section-header {
+          padding: 1rem 1.5rem;
+          background: #fafafa;
+          border-bottom: 1px solid #e2e8f0;
           display: flex;
           justify-content: space-between;
           align-items: center;
         }
-        .metric-list {
-          list-style: none;
-          padding: 0;
-          margin: 0;
-          font-size: 0.85rem;
+        .section-title { font-size: 0.875rem; font-weight: 600; color: #334155; }
+        
+        table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+        th { text-align: left; padding: 12px 24px; color: #64748b; font-weight: 500; border-bottom: 1px solid #e2e8f0; }
+        td { padding: 12px 24px; border-bottom: 1px solid #f1f5f9; }
+        tr:last-child td { border-bottom: none; }
+        
+        /* Badges */
+        .badge {
+          display: inline-flex;
+          align-items: center;
+          padding: 2px 8px;
+          border-radius: 9999px;
+          font-size: 0.7rem;
+          font-weight: 600;
+          margin-right: 4px;
         }
-        .metric-item {
-          display: flex;
-          justify-content: space-between;
-          padding: 4px 0;
-          border-bottom: 1px dashed #e5e7eb;
-        }
-        .metric-item:last-child { border-bottom: none; }
-        .metric-count {
-          background: #fee2e2;
-          color: #991b1b;
-          padding: 1px 6px;
-          border-radius: 10px;
-          font-size: 0.75rem;
-          font-weight: bold;
-        }
-        .refresh-hint {
-          font-size: 0.75rem;
-          color: #9ca3af;
-          font-weight: normal;
-        }
-        .progress-bar-bg {
-          background-color: #e5e7eb;
-          height: 6px;
-          border-radius: 3px;
-          margin-top: 4px;
-          overflow: hidden;
-        }
-        .progress-bar-fill {
-          height: 100%;
-          background-color: #6366f1;
-          transition: width 0.3s ease;
-        }
-        .warning-text { color: #d97706; }
-        .danger-text { color: #dc2626; }
+        .b-req { background: #eef2ff; color: #4f46e5; }
+        .b-db { background: #fef2f2; color: #ef4444; }
+        .b-cache { background: #f0fdf4; color: #16a34a; }
+        
+        /* Interactive */
+        .collapsible { cursor: pointer; user-select: none; }
+        .content { display: none; background: #f8fafc; padding: 10px 24px; font-size: 0.8rem; color: #64748b; }
+        .active .content { display: block; }
+
+        .progress-container { height: 8px; background: #e2e8f0; border-radius: 4px; margin-top: 10px; overflow: hidden; }
+        .progress-bar { height: 100%; background: var(--primary); transition: width 0.5s ease; }
       </style>
     </head>
     <body>
-      <div class="container">
-        <div style="margin-bottom: 1rem;">
-          <span class="status-dot"></span>
-          <span style="color: #10b981; font-weight: 600; font-size: 0.9rem;">SYSTEM OPERATIONAL</span>
-        </div>
-        <h1>DM-APP API</h1>
-        <p class="subtitle">Backend Services & Data Management</p>
-        
-        <div class="grid">
-          <div class="item">
-            <span class="label">Environment</span>
-            <span class="value">${env}</span>
+      <div class="hud-container">
+        <div class="header">
+          <div class="header-left">
+            <h1>DM-APP Status HUD</h1>
+            <p>Métricas acumuladas da hora atual (Reset às XX:00h)</p>
           </div>
-          <div class="item">
-            <span class="label">Version</span>
-            <span class="value">v1.0.0</span>
-          </div>
-          <div class="item">
-            <span class="label">Uptime</span>
-            <span class="value">${uptimeString}</span>
-          </div>
-          <div class="item">
-            <span class="label">SSE Service</span>
-            <span class="value" style="color: ${sseEnabled ? '#10b981' : '#ef4444'}; background: ${sseEnabled ? '#ecfdf5' : '#fef2f2'};">
-              ${sseEnabled ? 'ENABLED' : 'DISABLED'}
-            </span>
-          </div>
-          ${env === 'development' ? `
-          <div class="item">
-            <span class="label">Documentation</span>
-            <span><a href="/api-docs">Swagger UI &rarr;</a></span>
-          </div>
-          ` : ''}
-          <div class="item">
-            <span class="label">Health Check</span>
-            <span><a href="/api/v1/health">/api/v1/health &rarr;</a></span>
+          <div class="info-card">
+            <div>ENV: <span class="info-tag">${env.toUpperCase()}</span></div>
+            <div>VER: <span class="info-tag">v2.1</span></div>
+            <div>RESET EM: <span class="info-tag" id="reset-timer">${secondsToReset}</span>s</div>
           </div>
         </div>
 
-        <!-- Real-time Metrics Section -->
-        <div class="metrics-section" id="metrics-container">
-          <div class="metrics-title">
-            <span>Traffic Control (Reset in <span id="reset-timer">${secondsToReset}</span>s)</span>
-            <span class="refresh-hint" id="refresh-status">Live Updates</span>
+        <div class="kpi-grid">
+          <div class="kpi-card">
+            <div class="kpi-label">Requisições Totais</div>
+            <div class="kpi-value" id="kpi-reqs">${metrics.totalRequests} <span class="kpi-sub">acessos</span></div>
           </div>
-
-          <!-- Current IP Status -->
-          <div style="background: #f3f4f6; padding: 10px; border-radius: 6px; margin-bottom: 1rem;">
-            <div style="display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 4px;">
-              <span style="font-weight: 600;">Your IP (<span id="current-ip">${currentIp === '::1' ? 'Localhost' : currentIp}</span>)</span>
-              <span id="usage-text" style="font-weight: 600; color: ${currentIpPercent > 80 ? '#dc2626' : '#4b5563'}">
-                ${currentIpCount} / ${rateLimitMax} reqs
-              </span>
-            </div>
-            <div class="progress-bar-bg">
-              <div id="usage-bar" class="progress-bar-fill" style="width: ${currentIpPercent}%; background-color: ${currentIpPercent > 80 ? '#dc2626' : (currentIpPercent > 50 ? '#d97706' : '#10b981')}"></div>
+          <div class="kpi-card">
+            <div class="kpi-label">Queries no Banco</div>
+            <div class="kpi-value" style="color: var(--danger)" id="kpi-db">${sequelize.dbQueries || 0} <span class="kpi-sub">/ 500 h</span></div>
+            <div class="progress-container">
+              <div class="progress-bar" id="db-progress" style="width: ${(sequelize.dbQueries / 500) * 100}%"></div>
             </div>
           </div>
-          
-          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.5rem;">
-            <div>
-              <div style="font-size: 0.8rem; font-weight: 600; color: #6b7280; margin-bottom: 4px;">Top IPs</div>
-              <ul class="metric-list" id="top-ips">
-                ${topIps.length ? topIps.map(([ip, count]) => `
-                  <li class="metric-item">
-                    <span title="${ip}">${ip === '::1' ? 'Localhost' : ip.substring(0, 15)}</span>
-                    <span class="metric-count">${count}</span>
-                  </li>
-                `).join('') : '<li class="metric-item" style="color: #9ca3af;">No traffic</li>'}
-              </ul>
+          <div class="kpi-card">
+            <div class="kpi-label">Cache Hit Ratio</div>
+            <div class="kpi-value" style="color: var(--success)" id="kpi-cache">
+              ${metrics.totalRequests ? Math.round((metrics.cacheHits / (metrics.totalRequests || 1)) * 100) : 0}%
             </div>
-            
-            <div>
-              <div style="font-size: 0.8rem; font-weight: 600; color: #6b7280; margin-bottom: 4px;">Top Routes</div>
-              <ul class="metric-list" id="top-routes">
-                ${topRoutes.length ? topRoutes.map(([route, count]) => `
-                  <li class="metric-item">
-                    <span title="${route}" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px;">${route}</span>
-                    <span class="metric-count">${count}</span>
-                  </li>
-                `).join('') : '<li class="metric-item" style="color: #9ca3af;">No traffic</li>'}
-              </ul>
-            </div>
-          </div>
-          
-          <div style="margin-top: 10px; font-size: 0.8rem; text-align: right; color: #6b7280;">
-            Global Total (1m): <b id="total-requests">${metrics.totalRequests}</b>
           </div>
         </div>
 
-        <div class="footer">
-          &copy; ${new Date().getFullYear()} DM-APP Team. All systems nominal.
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Raio-X por Rota (Principal Uso)</span>
+            <span style="font-size: 0.7rem; color: #94a3b8">Legenda: <span class="badge b-req">Requests</span> <span class="badge b-db">DB Queries</span> <span class="badge b-cache">Cache</span></span>
+          </div>
+          <table id="routes-table">
+            <thead>
+              <tr>
+                <th>Rota</th>
+                <th style="width: 250px;">Métricas</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${sortedRoutes.map(([route, stats]) => `
+                <tr>
+                  <td style="font-family: monospace; font-size: 0.8rem;">${route}</td>
+                  <td>
+                    <span class="badge b-req">${stats.total}</span>
+                    <span class="badge b-db">${stats.db || 0}</span>
+                    <span class="badge b-cache">${stats.cache || 0}</span>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Top IPs & Comportamento</span>
+          </div>
+          <div id="ips-container">
+            ${sortedIps.map(([ip, stats]) => `
+              <div class="collapsible" onclick="this.classList.toggle('active')">
+                <div style="padding: 12px 24px; border-bottom: 1px solid #f1f5f9; display: flex; justify-content: space-between;">
+                  <span><strong>${ip}</strong></span>
+                  <span>
+                    <span class="badge b-req">${stats.total}</span>
+                    <span class="badge b-db">${stats.db || 0}</span>
+                  </span>
+                </div>
+                <div class="content">
+                   <strong>Rotas acessadas por este IP:</strong>
+                   <ul style="margin: 5px 0; padding-left: 15px;">
+                      ${Object.entries(stats.routes).map(([r, c]) => `<li>${r}: ${c}</li>`).join('')}
+                   </ul>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+
+        <div style="text-align: center; margin-top: 2rem;">
+           <select id="refresh-rate" style="font-size: 0.75rem; padding: 4px 8px; border-radius: 6px; border: 1px solid #cbd5e1;">
+              <option value="2000">Update 2s</option>
+              <option value="5000" selected>Update 5s</option>
+              <option value="15000">Update 15s</option>
+           </select>
+           <p style="font-size: 0.75rem; color: #94a3b8; margin-top: 10px;">Último "pisca": <span id="last-update">-</span></p>
         </div>
       </div>
+
       <script>
-        // Update timer every second locally
+        let refreshTimer = null;
         const timerEl = document.getElementById('reset-timer');
+        
+        // Timer local
         setInterval(() => {
-          let val = parseInt(timerEl.innerText);
-          if (val > 0) timerEl.innerText = val - 1;
+          let v = parseInt(timerEl.innerText);
+          if (v > 0) timerEl.innerText = v - 1;
         }, 1000);
 
-        // Fetch metrics every 2 seconds without reloading page
-        async function updateMetrics() {
-          if (document.visibilityState !== 'visible') return;
-          
+        async function updateHUD() {
           try {
             const res = await fetch('/api/status-metrics');
-            if (!res.ok) return;
             const data = await res.json();
             
-            // Update Timer
-            timerEl.innerText = data.secondsToReset;
-
-            // Update Usage Text & Bar
-            const usageText = document.getElementById('usage-text');
-            const usageBar = document.getElementById('usage-bar');
-            
-            usageText.innerText = \`\${data.currentIpCount} / \${data.rateLimitMax} reqs\`;
-            usageText.style.color = data.currentIpPercent > 80 ? '#dc2626' : '#4b5563';
-            
-            usageBar.style.width = \`\${data.currentIpPercent}%\`;
-            usageBar.style.backgroundColor = data.currentIpPercent > 80 ? '#dc2626' : (data.currentIpPercent > 50 ? '#d97706' : '#10b981');
-
-            // Update Top IPs
-            const ipsList = document.getElementById('top-ips');
-            if (data.topIps.length) {
-              ipsList.innerHTML = data.topIps.map(([ip, count]) => \`
-                  <li class="metric-item">
-                    <span title="\${ip}">\${ip === '::1' ? 'Localhost' : ip.substring(0, 15)}</span>
-                    <span class="metric-count">\${count}</span>
-                  </li>
-              \`).join('');
-            } else {
-              ipsList.innerHTML = '<li class="metric-item" style="color: #9ca3af;">No traffic</li>';
-            }
-
-            // Update Top Routes
-            const routesList = document.getElementById('top-routes');
-            if (data.topRoutes.length) {
-              routesList.innerHTML = data.topRoutes.map(([route, count]) => \`
-                  <li class="metric-item">
-                    <span title="\${route}" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px;">\${route}</span>
-                    <span class="metric-count">\${count}</span>
-                  </li>
-              \`).join('');
-            } else {
-              routesList.innerHTML = '<li class="metric-item" style="color: #9ca3af;">No traffic</li>';
-            }
-
-            // Update Total
-            document.getElementById('total-requests').innerText = data.totalRequests;
-
-          } catch (e) {
-            console.error('Metrics update failed', e);
-          }
+            document.getElementById('reset-timer').innerText = data.secondsToReset;
+            document.getElementById('kpi-reqs').innerHTML = data.totalRequests + ' <span class="kpi-sub">acessos</span>';
+            document.getElementById('kpi-db').innerHTML = data.dbQueries + ' <span class="kpi-sub">/ 500 h</span>';
+            document.getElementById('db-progress').style.width = Math.min((data.dbQueries / 500) * 100, 100) + '%';
+            document.getElementById('kpi-cache').innerText = Math.round((data.cacheHits / (data.totalRequests || 1)) * 100) + '%';
+            document.getElementById('last-update').innerText = new Date().toLocaleTimeString();
+          } catch(e) {}
         }
 
-        setInterval(updateMetrics, 10000);
+        document.getElementById('refresh-rate').addEventListener('change', (e) => {
+          clearInterval(refreshTimer);
+          refreshTimer = setInterval(updateHUD, parseInt(e.target.value));
+        });
+        refreshTimer = setInterval(updateHUD, 5000);
       </script>
     </body>
     </html>
@@ -627,25 +649,32 @@ app.get('/', (req, res) => {
   res.send(html);
 });
 
-// Endpoint leve para atualização via AJAX — protegido: apenas admins podem acessar
-app.get('/api/status-metrics', statusLimiter, authenticateToken, requireRole('admin', 'master', 'masteradmin'), (req, res) => {
-  // Limite de Rate Limit
+app.get('/api/status-metrics', statusLimiter, (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
+  // Usa o contador global do sequelize
+  const dbQueriesCount = sequelize.dbQueries || 0;
+  
+  // Limite de Rate Limit (Monitoramento individual do IP de quem acessa o painel)
   const rateLimitMax = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 300;
   const currentIp = req.ip;
-  const currentIpCount = metrics.ips[currentIp] || 0;
+  const currentIpCount = (metrics.ips[currentIp] ? metrics.ips[currentIp].total : 0);
   const currentIpPercent = Math.min((currentIpCount / rateLimitMax) * 100, 100).toFixed(1);
 
-  // Tempo restante para reset
-  const timeSinceReset = Date.now() - metrics.startTime;
-  const timeToReset = Math.max(0, 60000 - timeSinceReset);
-  const secondsToReset = Math.ceil(timeToReset / 1000);
+  // Tempo restante para reset ÀS :00h da próxima hora
+  const now = new Date();
+  const nextHour = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1, 0, 0);
+  const secondsToReset = Math.ceil((nextHour - now) / 1000);
+
+  // Formata Top 10 Rotas (para o HUD script se ele decidir re-renderizar algo no futuro)
+  const topRoutes = Object.entries(metrics.routes)
+    .sort(([, a], [, b]) => b.total - a.total)
+    .slice(0, 10);
 
   const topIps = Object.entries(metrics.ips)
-    .sort(([, a], [, b]) => b - a)
-    .slice(0, 5);
-
-  const topRoutes = Object.entries(metrics.routes)
-    .sort(([, a], [, b]) => b - a)
+    .sort(([, a], [, b]) => b.total - a.total)
     .slice(0, 5);
 
   res.json({
@@ -653,9 +682,12 @@ app.get('/api/status-metrics', statusLimiter, authenticateToken, requireRole('ad
     currentIpCount,
     currentIpPercent,
     secondsToReset,
-    topIps,
     topRoutes,
-    totalRequests: metrics.totalRequests
+    topIps,
+    totalRequests: metrics.totalRequests,
+    dbQueries: dbQueriesCount,
+    cacheHits: metrics.cacheHits,
+    dbErrors: metrics.dbErrors
   });
 });
 
