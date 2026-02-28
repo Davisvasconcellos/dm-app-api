@@ -3,16 +3,16 @@ const { Sequelize } = require('sequelize');
 const { requestContext } = require('../utils/requestContext');
 
 // Database configuration
-const dialect = process.env.DB_DIALECT || 'mysql';
+const dialect = process.env.DB_DIALECT || (process.env.DB_PORT === '5432' ? 'postgres' : 'mysql');
 const isPostgres = dialect === 'postgres' || !!process.env.DATABASE_URL;
 
 const commonOptions = {
-  dialect,
+  dialect: isPostgres ? 'postgres' : dialect, // Force postgres if detected
   logging: process.env.DB_LOGGING === 'true' ? console.log : false,
   pool: {
     max: parseInt(process.env.DB_POOL_MAX) || 15,
     min: parseInt(process.env.DB_POOL_MIN) || 2,
-    acquire: 10000,
+    acquire: 60000, // Aumentado para 60s
     idle: 10000
   },
   define: {
@@ -23,7 +23,7 @@ const commonOptions = {
   dialectOptions: isPostgres ? {
     ssl: {
       require: true,
-      rejectUnauthorized: false
+      rejectUnauthorized: false // Required for Render Postgres
     }
   } : {
     charset: 'utf8mb4'

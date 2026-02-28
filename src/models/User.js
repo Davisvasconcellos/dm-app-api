@@ -106,13 +106,13 @@ const User = sequelize.define('User', {
     defaultValue: 'active'
   },
   team_user: {
-    type: DataTypes.INTEGER,
-    allowNull: true,
-    references: {
-      model: 'football_teams',
-      key: 'id'
-    }
-  },
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: {
+        model: 'football_teams',
+        key: 'id'
+      }
+    },
   plan_id: {
     type: DataTypes.INTEGER,
     allowNull: true,

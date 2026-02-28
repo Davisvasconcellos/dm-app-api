@@ -18,7 +18,7 @@ const isTokenBlocked = async (token) => {
     return cached;
   }
   // Consulta banco apenas se não estiver em cache
-  const blocked = await TokenBlocklist.findByPk(token);
+  const blocked = await TokenBlocklist.findOne({ where: { token } });
   const result = !!blocked;
   blocklistCache.set(token, result);
   // Remove do cache após TTL
@@ -46,6 +46,8 @@ const authenticateToken = async (req, res, next) => {
 
     // Verifica cache de usuário primeiro
     const cachedUser = userCache.get(decoded.userId);
+
+
     if (cachedUser && (Date.now() - cachedUser.timestamp < USER_CACHE_TTL_MS)) {
       req.user = cachedUser.data;
       return next();
@@ -87,7 +89,8 @@ const authenticateToken = async (req, res, next) => {
     next();
   } catch (err) {
     if (process.env.NODE_ENV === 'development') {
-      console.error('Erro no token:', err.message);
+      console.error('Erro no token:', err.message, err.name);
+      if (err.expiredAt) console.error('Token expirado em:', err.expiredAt);
     }
     return res.status(403).json({ message: 'Token inválido ou expirado' });
   }

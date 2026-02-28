@@ -59,6 +59,9 @@ const errorHandler = require('./middlewares/errorHandler');
 const { sequelize, testConnection } = require('./config/database');
 
 const app = express();
+const debugRouter = require('./routes/debug');
+app.use('/api/debug', debugRouter);
+
 const PORT = process.env.PORT || 4000;
 
 // CORREÇÃO OBRIGATÓRIA NO RENDER (resolve o erro do rate-limit + SSE)
@@ -809,7 +812,30 @@ process.on('SIGTERM', () => {
 
 // Start server
 if (process.env.NODE_ENV !== 'test') {
-  server = app.listen(PORT, '0.0.0.0', () => {
+   // CORREÇÃO: Ajustes no banco de dados na inicialização
+   (async () => {
+     try {
+       // 1. Renomear token_blacklist para token_blocklist se necessário
+       try {
+         await sequelize.query('ALTER TABLE token_blacklist RENAME TO token_blocklist;');
+         console.log('✅ FIXED: Renamed token_blacklist to token_blocklist.');
+       } catch (e) {
+         // Ignora se tabela antiga não existe ou nova já existe
+       }
+
+       // 2. Adicionar coluna deleted_at na tabela events
+       try {
+         await sequelize.query('ALTER TABLE events ADD COLUMN deleted_at TIMESTAMP WITH TIME ZONE;');
+         console.log('✅ FIXED: Added deleted_at to events table.');
+       } catch (e) {
+         // Ignora erro se coluna já existe
+       }
+     } catch (err) {
+       console.error('Error during DB fixes:', err);
+     }
+   })();
+ 
+    server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
     if (process.env.NODE_ENV === 'development') {
       console.log(`Docs: ${process.env.API_PUBLIC_BASE_URL || `http://localhost:${PORT}`}/api-docs`);

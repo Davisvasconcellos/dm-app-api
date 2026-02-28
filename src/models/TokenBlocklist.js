@@ -1,20 +1,36 @@
+
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../config/database');
 
 const TokenBlocklist = sequelize.define('TokenBlocklist', {
-  token: {
-    type: DataTypes.STRING(500),
-    allowNull: false,
+  id: {
+    type: DataTypes.INTEGER,
     primaryKey: true,
+    autoIncrement: true,
+    allowNull: false
   },
-  expiresAt: {
-    type: DataTypes.DATE,
+  token: {
+    type: DataTypes.STRING(512),
     allowNull: false,
-    field: 'expiresAt' // Mapeia para a coluna 'expiresAt' no banco de dados
+    unique: true
+  },
+  expires_at: {
+    type: DataTypes.DATE,
+    allowNull: false
+  },
+  created_at: {
+    type: DataTypes.DATE,
+    defaultValue: DataTypes.NOW
+  },
+  updated_at: {
+    type: DataTypes.DATE,
+    defaultValue: DataTypes.NOW
   }
 }, {
-  tableName: 'token_blacklist',
-  timestamps: false,
+  tableName: 'token_blocklist',
+  timestamps: true,
+  createdAt: 'created_at',
+  updatedAt: 'updated_at'
 });
 
 module.exports = TokenBlocklist;
