@@ -1,3 +1,4 @@
+
 // Load base .env first
 require('dotenv').config();
 const { requestContext } = require('./utils/requestContext');
@@ -58,6 +59,9 @@ const errorHandler = require('./middlewares/errorHandler');
 // Import database connection
 const { sequelize, testConnection } = require('./config/database');
 
+// Import Firebase (trigger init log)
+require('./config/firebaseAdmin');
+
 const app = express();
 const debugRouter = require('./routes/debug');
 app.use('/api/debug', debugRouter);
@@ -98,801 +102,123 @@ const swaggerOptions = {
 const specs = swaggerJsdoc(swaggerOptions);
 
 // Security middleware
-app.use(helmet({
-  crossOriginResourcePolicy: false,
-  contentSecurityPolicy: false, // Necessário para permitir scripts inline na página de status
-}));
+app.use(helmet());
+app.use(cors());
 
-// CORS configuration
-const parseOrigins = (value) => (value || '')
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean);
+// Logger middleware
+if (process.env.NODE_ENV === 'development') {
+  app.use(morgan('dev'));
+}
 
-const whitelist = parseOrigins(process.env.CORS_ORIGIN);
+// Compression middleware
+app.use(compression());
 
-const corsOptions = {
-  origin: (origin, callback) => {
-    if (!origin) return callback(null, true);
-    if (whitelist.includes(origin)) return callback(null, true);
+// Body parser middleware
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-    if ((process.env.NODE_ENV || 'development') !== 'production') {
-      const localhostRange = /^http:\/\/localhost:(42|43)\d{2}$/;
-      if (localhostRange.test(origin)) return callback(null, true);
-    }
-
-    return callback(null, false);
-  },
-  credentials: true,
-};
-
-app.use(cors(corsOptions));
-
-// Compression com proteção para SSE
-const shouldCompress = (req, res) => {
-  if (req.headers['x-no-compression']) return false;
-  if (req.headers['accept']?.includes('text/event-stream')) return false;
-  return compression.filter(req, res);
-};
-app.use(compression({ filter: shouldCompress }));
-
-// Rate limiting (agora funciona corretamente com trust proxy)
-// Ajustado para eventos: 300 reqs/min por IP (suporta ~200 usuários simultâneos intensos)
-
-// Middleware de monitoramento de requisições por IP (Debug)
-// Estrutura de métricas melhorada para o HUD v2 (Acumulado por Hora)
-const metrics = {
-  totalRequests: 0,
-  dbQueries: 0,
-  cacheHits: 0,
-  dbErrors: 0,
-  startTime: Date.now(),
-  ips: {},    // { 'ip': { total: 0, db: 0, cache: 0, routes: {} } }
-  routes: {}  // { 'METHOD /path': { total: 0, db: 0, cache: 0 } }
-};
-
-// Limpa contadores TODO INÍCIO DE HORA (ex: 14:00:00)
-const metricsInterval = setInterval(() => {
-  const now = new Date();
-  if (now.getMinutes() === 0 && now.getSeconds() < 10) { 
-    metrics.ips = {};
-    metrics.routes = {};
-    metrics.totalRequests = 0;
-    metrics.cacheHits = 0;
-    metrics.dbErrors = 0;
-    metrics.startTime = Date.now();
-    if (sequelize) sequelize.dbQueries = 0;
-    console.log(`[Monitor] Contadores zerados em ${now.toISOString()}. Próximo em 1h.`);
-  }
-}, 10000); 
-
-app.set('metrics', metrics);
-
-// Middleware HUD v2: AsyncLocalStorage + Acumulador Hourly
+// Request Context Middleware (para métricas e logs)
 app.use((req, res, next) => {
-  if (req.path === '/api/status-metrics' || req.path === '/favicon.ico' || req.path.startsWith('/swagger')) return next();
-
-  const ip = req.ip;
-  const routeKey = `${req.method} ${req.path.substring(0, 40)}`; // Trunca rotas longas
-
-  // Inicializa contexto para rastrear queries desta request específica
-  const store = { dbQueries: 0, cacheHits: 0, ip, routeKey };
-
+  const store = {
+    requestId: require('uuid').v4(),
+    routeKey: req.path,
+    ip: req.ip,
+    dbQueries: 0,
+    cacheHits: 0
+  };
   requestContext.run(store, () => {
-    metrics.totalRequests++;
-    
-    // Atualiza acumulado por Rota
-    if (!metrics.routes[routeKey]) metrics.routes[routeKey] = { total: 0, db: 0, cache: 0 };
-    metrics.routes[routeKey].total++;
-
-    // Atualiza acumulado por IP
-    if (!metrics.ips[ip]) metrics.ips[ip] = { total: 0, db: 0, cache: 0, routes: {} };
-    metrics.ips[ip].total++;
-    if (!metrics.ips[ip].routes[routeKey]) metrics.ips[ip].routes[routeKey] = 0;
-    metrics.ips[ip].routes[routeKey]++;
-
-    // Ao terminar a request (finish), soma as queries atribuídas no acumulado geral das métricas
-    res.on('finish', () => {
-      const finalStore = requestContext.getStore() || store;
-      
-      // Update global metrics from specific request findings
-      if (metrics.routes[routeKey]) {
-        metrics.routes[routeKey].db += finalStore.dbQueries;
-        metrics.routes[routeKey].cache += finalStore.cacheHits;
-      }
-      if (metrics.ips[ip]) {
-        metrics.ips[ip].db += finalStore.dbQueries;
-        metrics.ips[ip].cache += finalStore.cacheHits;
-      }
-
-      // Sincroniza o total global de Cache Hits para o KPI do HUD
-      metrics.cacheHits += finalStore.cacheHits;
-      
-      if (finalStore.cacheHits > 0 && process.env.NODE_ENV === 'development') {
-        console.log(`[HUD Sync] Sincronizando ${finalStore.cacheHits} hits para ${routeKey}. Total global: ${metrics.cacheHits}`);
-      }
-      
-      // Global cache hits needs to be incremented too if the route didn't do it manually
-      // This is a safety net
-    });
-
     next();
   });
 });
 
-// Limpeza automática de tokens expirados da blocklist (a cada 1 hora)
-// Evita crescimento indefinido da tabela token_blocklists
-const blocklistCleanupInterval = setInterval(async () => {
-  try {
-    const deleted = await TokenBlocklist.destroy({
-      where: { expiresAt: { [Op.lt]: new Date() } }
-    });
-    if (deleted > 0) {
-      console.log(`[Blocklist Cleanup] ${deleted} token(s) expirado(s) removido(s).`);
-    }
-  } catch (err) {
-    console.error('[Blocklist Cleanup] Erro ao limpar tokens:', err.message);
-  }
-}, 60 * 60 * 1000); // 1 hora
-
-// CRON JOB: Processamento diário de recorrências financeiras
-// Roda todos os dias às 00:05 para provisionar as transações que venceram
-const recurrenceCronJob = cron.schedule('5 0 * * *', async () => {
-  console.log('[Cron] Iniciando processamento de recorrências financeiras...');
-  const results = await generatePendingTransactions();
-  console.log(`[Cron] Processamento concluído: ${results.processed} lidas, ${results.generated} geradas, ${results.errors} erros.`);
-});
-
-// CRON JOB: Sincronização periódica dos logs de Rate Limit para o Google Drive
-// Roda a cada 2 horas (ou ajustar conforme necessidade)
-const logSyncCronJob = cron.schedule('0 */2 * * *', async () => {
-  console.log('[Cron] Verificando logs locais para sincronização com o Drive...');
-  const logFilePath = path.join(process.cwd(), 'rate-limit-blocks.log');
-
-  if (fs.existsSync(logFilePath)) {
-    try {
-      const stats = fs.statSync(logFilePath);
-      // Sincroniza apenas se o arquivo for maior que o cabeçalho base de ~35 bytes
-      if (stats.size > 50) {
-        const fileContent = fs.readFileSync(logFilePath);
-
-        // Simular um File Object como esperado pelo Multer
-        const fileObject = {
-          originalname: `rate_limit_logs_${new Date().toISOString().replace(/[:.]/g, '-')}.log`,
-          buffer: fileContent,
-          mimetype: 'text/plain',
-        };
-
-        console.log(`[Cron] Iniciando upload do log de ${stats.size} bytes para o Drive...`);
-        // Faz o upload para a pasta 'Logs' no drive
-        await uploadFileToDrive(fileObject, 'Logs');
-        console.log('[Cron] Upload concluído. Limpando log local.');
-
-        // Limpa o log (mas mantém o cabeçalho inicial se desejar, ou apenas trunca)
-        fs.writeFileSync(logFilePath, '=== DM-APP API Rate Limit Logs ===\n');
-      } else {
-        console.log('[Cron] Arquivo de log pequeno/vazio, pulando sync.');
-      }
-    } catch (e) {
-      console.error('[Cron] Falha ao sincronizar os logs para o Drive:', e.message);
-    }
-  }
-});
-
-// Middleware de monitoramento movido para o topo
-
-const isLocalhost = (ip) => ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
-
+// Rate limiting
 const limiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 1 * 60 * 1000, // 1 minuto
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000, // 1000 requests por minuto (suporta redes NAT com muitos convidados de evento)
-  handler: (req, res, next, options) => {
-    const logMsg = `[${new Date().toISOString()}] 429 BLOCK | IP: ${req.ip} | Rota: ${req.method} ${req.originalUrl} | User-Agent: ${req.headers['user-agent'] || 'N/A'} | Origin: ${req.headers.origin || req.headers.referer || 'N/A'}\n`;
-    console.warn(logMsg.trim());
-    try {
-      fs.appendFileSync(path.join(process.cwd(), 'rate-limit-blocks.log'), logMsg);
-    } catch (e) {
-      console.error('Falha ao escrever log de rate limit:', e.message);
-    }
-    res.status(options.statusCode).json(options.message);
-  },
-  skip: (req) => {
-    // Ignora status-metrics ou se for localhost EM desenvolvimento
-    if (req.originalUrl.includes('/status-metrics')) return true;
-    if (process.env.NODE_ENV === 'development' && isLocalhost(req.ip)) return true;
-    return false;
-  },
-  message: {
-    error: 'Too many requests',
-    message: 'Muitas requisições. Tente novamente em alguns segundos.'
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 1000, // Limit each IP to 1000 requests per windowMs
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
 });
+app.use(limiter);
 
+// Speed limiter
 const speedLimiter = slowDown({
-  windowMs: 1 * 60 * 1000, // 1 minuto
-  delayAfter: 200, // Começa a atrasar após 200 requests
-  delayMs: () => 500, // Adiciona 500ms de delay por request extra
-  skip: (req) => {
-    if (req.originalUrl.includes('/status-metrics')) return true;
-    if (process.env.NODE_ENV === 'development' && isLocalhost(req.ip)) return true;
-    return false;
-  },
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  delayAfter: 500, // allow 500 requests per 15 minutes, then...
+  delayMs: () => 500 // begin adding 500ms of delay per request
 });
+app.use(speedLimiter);
 
-// Limitador específico para o dashboard de status (para não consumir cota global mas evitar abuso)
-const statusLimiter = rateLimit({
-  windowMs: 1 * 60 * 1000, // 1 minuto
-  max: 60, // 60 requests por minuto (1 por segundo - suficiente para o refresh de 2s)
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many status updates' }
-});
+// Swagger UI
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(specs));
 
-// Aplica limiter e slowdown em tudo, exceto na rota SSE
-app.use('/api/', limiter);
-app.use('/api/', speedLimiter);
-
-// Logging
-if (process.env.NODE_ENV === 'development') {
-  app.use(morgan('dev'));
-} else {
-  app.use(morgan('combined'));
-}
-
-// Body parsing
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// Static files
-app.use('/uploads', express.static('uploads'));
-
-// ROTA RAIZ
-app.get('/', (req, res) => {
-  // Se o cliente pedir JSON, retorna JSON
-  if (req.headers.accept && req.headers.accept.includes('application/json')) {
-    return res.json({
-      message: 'DM-APP API - OK',
-      environment: process.env.NODE_ENV || 'development',
-      docs: process.env.NODE_ENV === 'development'
-        ? `${process.env.API_PUBLIC_BASE_URL || `http://localhost:${PORT}`}/api-docs`
-        : 'Available only in development',
-      health: '/api/v1/health',
-      sse_test: process.env.ENABLE_SSE === 'true' ? '/api/stream-test' : 'disabled'
-    });
-  }
-
-  // Caso contrário, retorna página HTML amigável
-  const env = process.env.NODE_ENV || 'development';
-  const sseEnabled = process.env.ENABLE_SSE === 'true';
-
-  // Format Uptime
-  const uptimeSeconds = process.uptime();
-  const hours = Math.floor(uptimeSeconds / 3600);
-  const minutes = Math.floor((uptimeSeconds % 3600) / 60);
-  const seconds = Math.floor(uptimeSeconds % 60);
-  const uptimeString = `${hours}h ${minutes}m ${seconds}s`;
-
-  // Limite de Rate Limit
-  const rateLimitMax = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 300;
-  const currentIp = req.ip;
-  const currentIpCount = metrics.ips[currentIp] || 0;
-  const currentIpPercent = Math.min((currentIpCount / rateLimitMax) * 100, 100).toFixed(1);
-
-  // Tempo restante para reset
-  const timeSinceReset = Date.now() - metrics.startTime;
-  const timeToReset = Math.max(0, 60000 - timeSinceReset);
-  const secondsToReset = Math.ceil(timeToReset / 1000);
-
-  // Prepara dados de métricas para exibição (apenas se for admin ou dev - aqui aberto para demo)
-  const topIps = Object.entries(metrics.ips)
-    .sort(([, a], [, b]) => b - a)
-    .slice(0, 5); // Top 5 IPs
-
-  const topRoutes = Object.entries(metrics.routes)
-    .sort(([, a], [, b]) => b - a)
-    .slice(0, 5); // Top 5 Rotas
-
-  // Prepara dados formatados para a tabela
-  const sortedRoutes = Object.entries(metrics.routes)
-    .sort(([, a], [, b]) => b.total - a.total)
-    .slice(0, 10);
-
-  const sortedIps = Object.entries(metrics.ips)
-    .sort(([, a], [, b]) => b.total - a.total)
-    .slice(0, 8);
-
-  const html = `
-    <!DOCTYPE html>
-    <html lang="pt-BR">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>DM-APP HUD | Status por Hora</title>
-      <style>
-        :root {
-          --primary: #6366f1;
-          --success: #10b981;
-          --warning: #f59e0b;
-          --danger: #ef4444;
-          --bg: #f8fafc;
-          --card: #ffffff;
-          --text: #1e293b;
-        }
-        body {
-          font-family: 'Inter', system-ui, -apple-system, sans-serif;
-          background-color: var(--bg);
-          color: var(--text);
-          margin: 0;
-          padding: 20px;
-          display: flex;
-          justify-content: center;
-        }
-        .hud-container {
-          max-width: 900px;
-          width: 100%;
-        }
-        .header {
-          display: flex;
-          justify-content: space-between;
-          align-items: flex-end;
-          margin-bottom: 2rem;
-        }
-        .header-left h1 { margin: 0; font-size: 1.5rem; color: #0f172a; }
-        .header-left p { margin: 4px 0 0; color: #64748b; font-size: 0.875rem; }
-        
-        /* Stats Cards */
-        .kpi-grid {
-          display: grid;
-          grid-template-columns: repeat(3, 1fr);
-          gap: 1rem;
-          margin-bottom: 2rem;
-        }
-        .kpi-card {
-          background: var(--card);
-          padding: 1.25rem;
-          border-radius: 12px;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-          border: 1px solid #e2e8f0;
-        }
-        .kpi-label { font-size: 0.75rem; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.025em; }
-        .kpi-value { font-size: 1.75rem; font-weight: 700; margin-top: 4px; display: flex; align-items: baseline; gap: 8px; }
-        .kpi-sub { font-size: 0.75rem; font-weight: 400; color: #94a3b8; }
-
-        /* System Info Card */
-        .info-card {
-          background: #f1f5f9;
-          padding: 10px 15px;
-          border-radius: 8px;
-          font-size: 0.75rem;
-          display: flex;
-          gap: 20px;
-          color: #475569;
-        }
-        .info-tag { font-weight: 600; color: var(--primary); }
-
-        /* Tables & Sections */
-        .section {
-          background: var(--card);
-          border-radius: 12px;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-          border: 1px solid #e2e8f0;
-          margin-bottom: 1.5rem;
-          overflow: hidden;
-        }
-        .section-header {
-          padding: 1rem 1.5rem;
-          background: #fafafa;
-          border-bottom: 1px solid #e2e8f0;
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-        }
-        .section-title { font-size: 0.875rem; font-weight: 600; color: #334155; }
-        
-        table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
-        th { text-align: left; padding: 12px 24px; color: #64748b; font-weight: 500; border-bottom: 1px solid #e2e8f0; }
-        td { padding: 12px 24px; border-bottom: 1px solid #f1f5f9; }
-        tr:last-child td { border-bottom: none; }
-        
-        /* Badges */
-        .badge {
-          display: inline-flex;
-          align-items: center;
-          padding: 2px 8px;
-          border-radius: 9999px;
-          font-size: 0.7rem;
-          font-weight: 600;
-          margin-right: 4px;
-        }
-        .b-req { background: #eef2ff; color: #4f46e5; }
-        .b-db { background: #fef2f2; color: #ef4444; }
-        .b-cache { background: #f0fdf4; color: #16a34a; }
-        
-        /* Interactive */
-        .collapsible { cursor: pointer; user-select: none; }
-        .content { display: none; background: #f8fafc; padding: 10px 24px; font-size: 0.8rem; color: #64748b; }
-        .active .content { display: block; }
-
-        .progress-container { height: 8px; background: #e2e8f0; border-radius: 4px; margin-top: 10px; overflow: hidden; }
-        .progress-bar { height: 100%; background: var(--primary); transition: width 0.5s ease; }
-      </style>
-    </head>
-    <body>
-      <div class="hud-container">
-        <div class="header">
-          <div class="header-left">
-            <h1>DM-APP Status HUD</h1>
-            <p>Métricas acumuladas da hora atual (Reset às XX:00h)</p>
-          </div>
-          <div class="info-card">
-            <div>ENV: <span class="info-tag">${env.toUpperCase()}</span></div>
-            <div>VER: <span class="info-tag">v2.1</span></div>
-            <div>RESET EM: <span class="info-tag" id="reset-timer">${secondsToReset}</span>s</div>
-          </div>
-        </div>
-
-        <div class="kpi-grid">
-          <div class="kpi-card">
-            <div class="kpi-label">Requisições Totais</div>
-            <div class="kpi-value" id="kpi-reqs">${metrics.totalRequests} <span class="kpi-sub">acessos</span></div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-label">Queries no Banco</div>
-            <div class="kpi-value" style="color: var(--danger)" id="kpi-db">${sequelize.dbQueries || 0} <span class="kpi-sub">/ 500 h</span></div>
-            <div class="progress-container">
-              <div class="progress-bar" id="db-progress" style="width: ${(sequelize.dbQueries / 500) * 100}%"></div>
-            </div>
-          </div>
-          <div class="kpi-card">
-            <div class="kpi-label">Cache Hit Ratio</div>
-            <div class="kpi-value" style="color: var(--success)" id="kpi-cache">
-              ${metrics.totalRequests ? Math.round((metrics.cacheHits / (metrics.totalRequests || 1)) * 100) : 0}%
-            </div>
-          </div>
-        </div>
-
-        <div class="section">
-          <div class="section-header">
-            <span class="section-title">Raio-X por Rota (Principal Uso)</span>
-            <span style="font-size: 0.7rem; color: #94a3b8">Legenda: <span class="badge b-req">Requests</span> <span class="badge b-db">DB Queries</span> <span class="badge b-cache">Cache</span></span>
-          </div>
-          <table id="routes-table">
-            <thead>
-              <tr>
-                <th>Rota</th>
-                <th style="width: 250px;">Métricas</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${sortedRoutes.map(([route, stats]) => `
-                <tr>
-                  <td style="font-family: monospace; font-size: 0.8rem;">${route}</td>
-                  <td>
-                    <span class="badge b-req">${stats.total}</span>
-                    <span class="badge b-db">${stats.db || 0}</span>
-                    <span class="badge b-cache">${stats.cache || 0}</span>
-                  </td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-        </div>
-
-        <div class="section">
-          <div class="section-header">
-            <span class="section-title">Top IPs & Comportamento</span>
-          </div>
-          <div id="ips-container">
-            ${sortedIps.map(([ip, stats]) => `
-              <div class="collapsible" onclick="this.classList.toggle('active')">
-                <div style="padding: 12px 24px; border-bottom: 1px solid #f1f5f9; display: flex; justify-content: space-between;">
-                  <span><strong>${ip}</strong></span>
-                  <span>
-                    <span class="badge b-req">${stats.total}</span>
-                    <span class="badge b-db">${stats.db || 0}</span>
-                  </span>
-                </div>
-                <div class="content">
-                   <strong>Rotas acessadas por este IP:</strong>
-                   <ul style="margin: 5px 0; padding-left: 15px;">
-                      ${Object.entries(stats.routes).map(([r, c]) => `<li>${r}: ${c}</li>`).join('')}
-                   </ul>
-                </div>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-
-        <div style="text-align: center; margin-top: 2rem;">
-           <select id="refresh-rate" style="font-size: 0.75rem; padding: 4px 8px; border-radius: 6px; border: 1px solid #cbd5e1;">
-              <option value="2000">Update 2s</option>
-              <option value="5000" selected>Update 5s</option>
-              <option value="15000">Update 15s</option>
-           </select>
-           <p style="font-size: 0.75rem; color: #94a3b8; margin-top: 10px;">Último "pisca": <span id="last-update">-</span></p>
-        </div>
-      </div>
-
-      <script>
-        let refreshTimer = null;
-        const timerEl = document.getElementById('reset-timer');
-        
-        // Timer local
-        setInterval(() => {
-          let v = parseInt(timerEl.innerText);
-          if (v > 0) timerEl.innerText = v - 1;
-        }, 1000);
-
-        async function updateHUD() {
-          try {
-            const res = await fetch('/api/status-metrics');
-            const data = await res.json();
-            
-            document.getElementById('reset-timer').innerText = data.secondsToReset;
-            document.getElementById('kpi-reqs').innerHTML = data.totalRequests + ' <span class="kpi-sub">acessos</span>';
-            document.getElementById('kpi-db').innerHTML = data.dbQueries + ' <span class="kpi-sub">/ 500 h</span>';
-            document.getElementById('db-progress').style.width = Math.min((data.dbQueries / 500) * 100, 100) + '%';
-            document.getElementById('kpi-cache').innerText = Math.round((data.cacheHits / (data.totalRequests || 1)) * 100) + '%';
-            document.getElementById('last-update').innerText = new Date().toLocaleTimeString();
-          } catch(e) {}
-        }
-
-        document.getElementById('refresh-rate').addEventListener('change', (e) => {
-          clearInterval(refreshTimer);
-          refreshTimer = setInterval(updateHUD, parseInt(e.target.value));
-        });
-        refreshTimer = setInterval(updateHUD, 5000);
-      </script>
-    </body>
-    </html>
-  `;
-
-  res.send(html);
-});
-
-app.get('/api/status-metrics', statusLimiter, (req, res) => {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-  res.setHeader('Pragma', 'no-cache');
-  res.setHeader('Expires', '0');
-
-  // Usa o contador global do sequelize
-  const dbQueriesCount = sequelize.dbQueries || 0;
-  
-  // Limite de Rate Limit (Monitoramento individual do IP de quem acessa o painel)
-  const rateLimitMax = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 300;
-  const currentIp = req.ip;
-  const currentIpCount = (metrics.ips[currentIp] ? metrics.ips[currentIp].total : 0);
-  const currentIpPercent = Math.min((currentIpCount / rateLimitMax) * 100, 100).toFixed(1);
-
-  // Tempo restante para reset ÀS :00h da próxima hora
-  const now = new Date();
-  const nextHour = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1, 0, 0);
-  const secondsToReset = Math.ceil((nextHour - now) / 1000);
-
-  // Formata Top 10 Rotas (para o HUD script se ele decidir re-renderizar algo no futuro)
-  const topRoutes = Object.entries(metrics.routes)
-    .sort(([, a], [, b]) => b.total - a.total)
-    .slice(0, 10);
-
-  const topIps = Object.entries(metrics.ips)
-    .sort(([, a], [, b]) => b.total - a.total)
-    .slice(0, 5);
-
-  res.json({
-    rateLimitMax,
-    currentIpCount,
-    currentIpPercent,
-    secondsToReset,
-    topRoutes,
-    topIps,
-    totalRequests: metrics.totalRequests,
-    dbQueries: dbQueriesCount,
-    cacheHits: metrics.cacheHits,
-    dbErrors: metrics.dbErrors
-  });
-});
-
-// Health check
-app.get('/api/v1/health', (req, res) => {
-  res.json({
-    status: 'OK',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    environment: process.env.NODE_ENV || 'development'
-  });
-});
-
-// === ROTA SSE (Opcional - Ativada via ENV) ===
-if (process.env.ENABLE_SSE === 'true') {
-  app.get('/api/stream-test', (req, res) => {
-    const origin = req.headers.origin;
-
-    // CORS para SSE
-    if (origin && whitelist.includes(origin)) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-    }
-
-    // Headers obrigatórios para SSE funcionar em qualquer proxy
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no'); // Crucial no Render/Nginx/Cloudflare
-
-    // Evita compressão gzip na stream
-    req.headers['x-no-compression'] = 'true';
-
-    res.flushHeaders();
-
-    // Envia mensagem inicial
-    res.write(`data: ${JSON.stringify({
-      type: 'connection',
-      message: 'Conectado ao DM-APP SSE',
-      time: new Date().toISOString()
-    })}\n\n`);
-
-    const interval = setInterval(() => {
-      const data = {
-        time: new Date().toISOString(),
-        online: true,
-        uptime: process.uptime(),
-        random: Math.floor(Math.random() * 1000000)
-      };
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
-    }, 3000);
-
-    // Limpeza ao fechar conexão
-    req.on('close', () => {
-      clearInterval(interval);
-      console.log('SSE desconectado:', req.ip);
-    });
-  });
-}
-
-// API routes
+// Routes
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/users', userRoutes);
 app.use('/api/v1/products', productRoutes);
 app.use('/api/v1/orders', orderRoutes);
 app.use('/api/v1/stores', storeRoutes);
 app.use('/api/v1/football-teams', footballTeamsRoutes);
+
+// Rotas Públicas Específicas (antes das genéricas para evitar captura por :id)
+app.use('/api/events/public', (req, res, next) => {
+  req.url = '/public'; // Reescreve para casar com a rota '/' ou '/public' dentro do router
+  eventOpenRoutes(req, res, next);
+});
+
 app.use('/api/v1/events', eventRoutes);
-app.use('/api/events', eventOpenRoutes);
+app.use('/api/events', eventRoutes); // Alias for legacy/frontend compatibility
+app.use('/api/v1/event-jams', eventJamsRoutes); // Alias
+app.use('/api/v1/events', eventJamsRoutes); // Mount jams under events too if needed, but separate is safer
+app.use('/api/events', eventJamsRoutes); // Alias for legacy/frontend compatibility
 app.use('/api/public/v1/events', eventOpenRoutes);
-app.use('/api/v1/events', eventJamsRoutes);
-app.use('/api/events', eventJamsRoutes);
-app.use('/api/public/v1/events', eventJamsRoutes);
-app.use('/api/v1/uploads', uploadRouter);
 app.use('/api/v1/files', filesRoutes);
-app.use('/api/v1/financial/bank-accounts', bankAccountRoutes);
-app.use('/api/v1/financial/parties', partyRoutes);
+app.use('/api/v1/financial', financialRoutes);
+app.use('/api/v1/financial/recurrences', finRecurrenceRoutes);
+app.use('/api/v1/bank-accounts', bankAccountRoutes);
+app.use('/api/v1/parties', partyRoutes);
 app.use('/api/v1/financial/categories', finCategoryRoutes);
 app.use('/api/v1/financial/cost-centers', finCostCenterRoutes);
 app.use('/api/v1/financial/tags', finTagRoutes);
-app.use('/api/v1/financial', financialRoutes);
-app.use('/api/v1/financial', finRecurrenceRoutes);
 app.use('/api/v1/sys-modules', sysModuleRoutes);
-app.use('/api/v1/music-suggestions', eventJamMusicSuggestionRoutes);
+app.use('/api/v1/event-jam-music-suggestions', eventJamMusicSuggestionRoutes);
+app.use('/api/v1/music-suggestions', eventJamMusicSuggestionRoutes); // Alias for frontend compatibility
 app.use('/api/v1/music-catalog', musicCatalogRoutes);
 
-// Swagger UI(apenas dev)
-if (process.env.NODE_ENV === 'development') {
-  app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(specs));
-}
+// Upload routes
+app.use('/api/v1/upload', uploadRouter);
 
-// 404
-app.use('*', (req, res) => {
-  res.status(404).json({
-    error: 'Not Found',
-    message: 'Endpoint não encontrado'
-  });
-});
-
-// Error handler
+// Error handler middleware
 app.use(errorHandler);
 
-// Graceful shutdown
-let server;
-
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully');
-  clearInterval(metricsInterval);
-  clearInterval(blocklistCleanupInterval);
-  recurrenceCronJob.stop();
-  logSyncCronJob.stop();
-  if (server) {
-    server.close(() => {
-      console.log('Server closed');
-      process.exit(0);
-    });
+// Cron Jobs
+// Gerar transações pendentes diariamente às 00:01
+cron.schedule('1 0 * * *', async () => {
+  console.log('Running daily recurrence check...');
+  try {
+    await generatePendingTransactions();
+    console.log('Daily recurrence check completed.');
+  } catch (error) {
+    console.error('Daily recurrence check failed:', error);
   }
 });
 
 // Start server
-if (process.env.NODE_ENV !== 'test') {
-   // CORREÇÃO: Ajustes no banco de dados na inicialização
-   (async () => {
-     try {
-       // 1. Renomear token_blacklist para token_blocklist se necessário
-       try {
-         await sequelize.query('ALTER TABLE token_blacklist RENAME TO token_blocklist;');
-         console.log('✅ FIXED: Renamed token_blacklist to token_blocklist.');
-       } catch (e) {
-         // Ignora se tabela antiga não existe ou nova já existe
-       }
-
-       // 2. Adicionar coluna deleted_at na tabela events
-       try {
-         await sequelize.query('ALTER TABLE events ADD COLUMN deleted_at TIMESTAMP WITH TIME ZONE;');
-         console.log('✅ FIXED: Added deleted_at to events table.');
-       } catch (e) {
-         // Ignora erro se coluna já existe
-       }
-     } catch (err) {
-       console.error('Error during DB fixes:', err);
-     }
-   })();
- 
-    server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on port ${PORT}`);
-    if (process.env.NODE_ENV === 'development') {
-      console.log(`Docs: ${process.env.API_PUBLIC_BASE_URL || `http://localhost:${PORT}`}/api-docs`);
-    }
-
-    // Check Services Status
-    const checkServices = async () => {
-      console.log('\n--- Service Status ---');
-
-      // Upload Path
-      const uploadPath = process.env.UPLOAD_PATH || './uploads';
-      try {
-        if (!fs.existsSync(uploadPath)) fs.mkdirSync(uploadPath, { recursive: true });
-        fs.accessSync(uploadPath, fs.constants.W_OK);
-        console.log('✅ Upload Service: Ready (Write Access OK)');
-      } catch (err) {
-        console.log('❌ Upload Service: Failed (No Write Access)');
-      }
-
-      // PDF Service (Puppeteer)
-      try {
-        require('puppeteer');
-        console.log('✅ PDF Service: Ready (Puppeteer Installed)');
-      } catch (e) {
-        console.log('⚠️ PDF Service: Warning (Puppeteer not found)');
-      }
-
-      // SSE Status
-      const sseEnabled = process.env.ENABLE_SSE === 'true';
-      console.log(sseEnabled
-        ? '✅ SSE Service: Enabled'
-        : 'qc SSE Service: Disabled (Polling Mode Recommended)');
-
-      // Firebase
-      const firebaseConfigured = process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_PRIVATE_KEY;
-      console.log(firebaseConfigured
-        ? '✅ Firebase Service: Configured'
-        : '⚠️ Firebase Service: Not Configured');
-
-      console.log('----------------------\n');
-    };
-
-    checkServices();
-  });
-}
-
-// Database connection
-(async () => {
+const server = app.listen(PORT, async () => {
+  console.log(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
   try {
-    if (process.env.NODE_ENV !== 'test') {
-      await testConnection();
-      console.log('Database connected successfully');
-    }
+    await testConnection(); // Usa a função de teste que tem logs coloridos
+    console.log('Database connected!');
+    // await sequelize.sync(); // Disable sync in production/dev usually
   } catch (error) {
-    console.error('Database connection failed:', error);
-    process.exit(1);
+    console.error('Unable to connect to the database:', error);
   }
-})();
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (err, promise) => {
+  console.log(`Error: ${err.message}`);
+  // Close server & exit process
+  // server.close(() => process.exit(1));
+});
 
 module.exports = app;

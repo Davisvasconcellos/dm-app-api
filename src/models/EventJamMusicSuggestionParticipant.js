@@ -19,7 +19,11 @@ const EventJamMusicSuggestionParticipant = sequelize.define('EventJamMusicSugges
   },
   user_id: {
     type: DataTypes.INTEGER,
-    allowNull: false
+    allowNull: true
+  },
+  guest_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true
   },
   instrument: {
     type: DataTypes.STRING,

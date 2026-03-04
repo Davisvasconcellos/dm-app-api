@@ -34,40 +34,39 @@ router.get('/search', authenticateToken, async (req, res) => {
     console.log(`[MusicCatalog] Encontrados ${localResults.length} resultados locais.`);
 
     // 2. Se tivermos poucos resultados locais, buscamos no Discogs
-    // (Por enquanto, vamos simular que buscamos sempre para testar o fluxo de inserção, 
-    // mas na prática podemos limitar para economizar API)
     let externalResults = [];
     try {
+        console.log(`[MusicCatalog] Buscando no Discogs: "${q}"`);
         externalResults = await discogsService.search(q);
+        console.log(`[MusicCatalog] Discogs retornou ${externalResults.length} resultados.`);
     } catch (err) {
         console.error('[MusicCatalog] Erro ao buscar no Discogs:', err.message);
-        // Não falha a requisição, apenas segue com o que tem local
     }
 
-    // 3. Processamento dos Resultados Externos (Bulk Insert)
+    // 3. Processamento dos Resultados Externos
     if (externalResults.length > 0) {
       const newEntries = [];
+      const externalIds = externalResults.map(r => r.id);
       
       // Verifica quais já existem no banco (pelo discogs_id)
-      const existingDiscogsIds = await EventJamMusicCatalog.findAll({
-        where: {
-          discogs_id: externalResults.map(r => r.id)
-        },
-        attributes: ['discogs_id']
-      }).then(rows => rows.map(r => r.discogs_id));
+      const existingEntries = await EventJamMusicCatalog.findAll({
+        where: { discogs_id: externalIds },
+        attributes: ['id', 'discogs_id']
+      });
+      const existingDiscogsIds = existingEntries.map(r => r.discogs_id);
 
       for (const result of externalResults) {
         if (!existingDiscogsIds.includes(result.id)) {
           newEntries.push({
             discogs_id: result.id,
             title: result.title,
-            artist: result.artist, // Discogs retorna "Artist - Title" as vezes, precisa tratar
+            artist: result.artist, 
             cover_image: result.cover_image,
             thumb_image: result.thumb,
             year: result.year,
             genre: result.genre ? result.genre[0] : null,
-            extra_data: result, // Guarda o payload bruto
-            usage_count: 0 // Começa com 0 até alguém escolher
+            extra_data: result,
+            usage_count: 0
           });
         }
       }
@@ -75,23 +74,27 @@ router.get('/search', authenticateToken, async (req, res) => {
       if (newEntries.length > 0) {
         console.log(`[MusicCatalog] Inserindo ${newEntries.length} novas músicas do Discogs no catálogo local.`);
         await EventJamMusicCatalog.bulkCreate(newEntries);
-        
-        // Opcional: Buscar novamente para retornar a lista completa e ordenada/padronizada do banco
-        // Isso garante que o frontend sempre receba objetos com a mesma estrutura (do nosso Model)
-        return res.json(await EventJamMusicCatalog.findAll({
-            where: {
-                [Op.or]: [
-                  { title: { [Op.like]: `%${q}%` } },
-                  { artist: { [Op.like]: `%${q}%` } }
-                ]
-            },
-            limit: 50,
-            order: [['usage_count', 'DESC'], ['title', 'ASC']]
-        }));
+      } else {
+        console.log('[MusicCatalog] Todos os resultados do Discogs já existem no banco.');
       }
+
+      // 4. Retorna resultados combinados (Local + Novos/Existentes do Discogs)
+      // Recarrega do banco para garantir que temos tudo padronizado e ordenado
+      // Agora buscamos por (Query Match) OR (Discogs IDs encontrados)
+      return res.json(await EventJamMusicCatalog.findAll({
+          where: {
+              [Op.or]: [
+                { title: { [Op.like]: `%${q}%` } },
+                { artist: { [Op.like]: `%${q}%` } },
+                { discogs_id: externalIds } // Garante que o que veio do Discogs apareça, mesmo se o texto for ligeiramente diferente
+              ]
+          },
+          limit: 50,
+          order: [['usage_count', 'DESC'], ['title', 'ASC']]
+      }));
     }
 
-    // Se não teve novidades externas, retorna o local
+    // Se não teve novidades externas e nem resultados externos, retorna o local
     return res.json(localResults);
 
   } catch (error) {

@@ -26,13 +26,22 @@ const Event = sequelize.define('Event', {
     type: DataTypes.STRING(500),
     allowNull: true
   },
-  start_datetime: {
-    type: DataTypes.DATE,
+  start_time: {
+    type: DataTypes.TIME,
     allowNull: true
   },
-  end_datetime: {
-    type: DataTypes.DATE,
+  end_time: {
+    type: DataTypes.TIME,
     allowNull: true
+  },
+  date: {
+    type: DataTypes.DATEONLY,
+    allowNull: false
+  },
+  status: {
+    type: DataTypes.STRING(50),
+    allowNull: false,
+    defaultValue: 'draft'
   },
   created_by: {
     type: DataTypes.INTEGER,
@@ -104,6 +113,14 @@ const Event = sequelize.define('Event', {
   checkin_component_config: {
     type: DataTypes.JSON,
     allowNull: true
+  },
+  store_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    references: {
+      model: 'stores',
+      key: 'id'
+    }
   }
 }, {
   tableName: 'events',

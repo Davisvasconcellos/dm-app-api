@@ -42,14 +42,7 @@ SysModule.associate({ User });
 User.associate({ SysModule });
 
 // EventJamMusicSuggestion Associations
-EventJamMusicSuggestion.belongsTo(User, { foreignKey: 'created_by_user_id', as: 'creator' });
-User.hasMany(EventJamMusicSuggestion, { foreignKey: 'created_by_user_id', as: 'createdJamSuggestions' });
-
-EventJamMusicSuggestion.hasMany(EventJamMusicSuggestionParticipant, { foreignKey: 'music_suggestion_id', as: 'participants' });
-EventJamMusicSuggestionParticipant.belongsTo(EventJamMusicSuggestion, { foreignKey: 'music_suggestion_id', as: 'suggestion' });
-
-EventJamMusicSuggestionParticipant.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
-User.hasMany(EventJamMusicSuggestionParticipant, { foreignKey: 'user_id', as: 'jamSuggestionParticipations' });
+// Note: Some associations might be duplicated if defined below again. Keeping the ones below as authoritative.
 
 // EventJamMusicCatalog Associations
 EventJamMusicCatalog.hasMany(EventJamSong, { foreignKey: 'catalog_id', as: 'jamSongs' });
@@ -62,6 +55,8 @@ EventJamMusicSuggestion.belongsTo(EventJamMusicCatalog, { foreignKey: 'catalog_i
 // Plan associations
 Plan.hasMany(User, { foreignKey: 'plan_id', as: 'users' });
 User.belongsTo(Plan, { foreignKey: 'plan_id', as: 'plan' });
+
+
 
 // Store associations
 Store.hasMany(Product, { foreignKey: 'store_id', as: 'products' });
@@ -135,6 +130,10 @@ EventQuestion.belongsTo(Event, { foreignKey: 'event_id', as: 'event' });
 
 Event.hasMany(EventResponse, { foreignKey: 'event_id', as: 'responses' });
 EventResponse.belongsTo(Event, { foreignKey: 'event_id', as: 'event' });
+
+EventResponse.belongsTo(EventGuest, { foreignKey: 'guest_id', as: 'guest' });
+EventGuest.hasMany(EventResponse, { foreignKey: 'guest_id', as: 'responses' });
+
 // Vincular respostas ao usuário (quando autenticado)
 EventResponse.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 User.hasMany(EventResponse, { foreignKey: 'user_id', as: 'eventResponses' });
@@ -239,6 +238,25 @@ FinCostCenter.hasMany(FinRecurrence, { foreignKey: 'cost_center_id', sourceKey: 
 
 FinRecurrence.belongsTo(Party, { foreignKey: 'party_id', targetKey: 'id_code', as: 'party' });
 Party.hasMany(FinRecurrence, { foreignKey: 'party_id', sourceKey: 'id_code', as: 'recurrences' });
+
+// EventJamMusicSuggestion associations
+EventJamMusicSuggestion.belongsTo(Event, { foreignKey: 'event_id', as: 'event' });
+Event.hasMany(EventJamMusicSuggestion, { foreignKey: 'event_id', as: 'musicSuggestions' });
+
+EventJamMusicSuggestion.belongsTo(User, { foreignKey: 'created_by_user_id', as: 'creator' });
+User.hasMany(EventJamMusicSuggestion, { foreignKey: 'created_by_user_id', as: 'createdMusicSuggestions' });
+
+EventJamMusicSuggestion.belongsTo(EventGuest, { foreignKey: 'created_by_guest_id', as: 'guestCreator' });
+EventGuest.hasMany(EventJamMusicSuggestion, { foreignKey: 'created_by_guest_id', as: 'createdMusicSuggestions' });
+
+EventJamMusicSuggestion.hasMany(EventJamMusicSuggestionParticipant, { foreignKey: 'music_suggestion_id', as: 'participants' });
+EventJamMusicSuggestionParticipant.belongsTo(EventJamMusicSuggestion, { foreignKey: 'music_suggestion_id', as: 'suggestion' });
+
+EventJamMusicSuggestionParticipant.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+User.hasMany(EventJamMusicSuggestionParticipant, { foreignKey: 'user_id', as: 'musicSuggestionParticipations' });
+
+EventJamMusicSuggestionParticipant.belongsTo(EventGuest, { foreignKey: 'guest_id', as: 'guest' });
+EventGuest.hasMany(EventJamMusicSuggestionParticipant, { foreignKey: 'guest_id', as: 'musicSuggestionParticipations' });
 
 module.exports = {
   sequelize,

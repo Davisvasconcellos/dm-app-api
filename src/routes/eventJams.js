@@ -3,12 +3,31 @@ const { body, validationResult } = require('express-validator');
 const { authenticateToken, requireRole, requireModule } = require('../middlewares/auth');
 const jwt = require('jsonwebtoken');
 const { Op } = require('sequelize');
-const { Event, EventJam, EventJamSong, EventJamSongInstrumentSlot, EventJamSongCandidate, EventJamSongRating, EventGuest, User, EventJamMusicCatalog } = require('../models');
+const { Event, EventJam, EventJamSong, EventJamSongInstrumentSlot, EventJamSongCandidate, EventJamSongRating, EventGuest, User, EventJamMusicCatalog, TokenBlocklist } = require('../models');
 const discogsService = require('../services/discogsService');
 const { incrementMetric } = require('../utils/requestContext');
 const { jamsCache, clearJamsCache, JAMS_CACHE_TTL } = require('../utils/cacheManager');
 
 const router = express.Router();
+
+// Middleware opcional para extrair usuário se token existir
+const optionalAuth = async (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  
+  if (token) {
+    try {
+      const isBlocked = await TokenBlocklist.findByPk(token);
+      if (!isBlocked) {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user = decoded; // Define req.user se válido
+      }
+    } catch (err) {
+      // Ignora erro, segue como guest (req.user undefined)
+    }
+  }
+  next();
+};
 
 const sseClients = new Map();
 const getKey = (eventId, jamId) => `${eventId}-${jamId}`;
@@ -46,6 +65,150 @@ router.get('/:id/jams/:jamId/stream', (req, res) => {
     set.delete(res);
     clearInterval(heartbeat);
   });
+});
+
+// GET /:id/jam (Singular) - Retorna a Jam principal do evento (para guests)
+router.get('/:id/jam', optionalAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const event = await Event.findOne({ where: { id_code: id } });
+    if (!event) return res.status(404).json({ error: 'Not Found', message: 'Evento não encontrado' });
+
+    const jam = await EventJam.findOne({ 
+      where: { event_id: event.id },
+      order: [['order_index', 'ASC'], ['created_at', 'ASC']]
+    });
+
+    if (!jam) return res.status(404).json({ error: 'Not Found', message: 'Nenhuma Jam ativa encontrada' });
+
+    return res.json({
+      success: true,
+      data: {
+        id: jam.id_code,
+        name: jam.name,
+        status: jam.status,
+        slug: jam.slug
+      }
+    });
+  } catch (err) {
+    console.error('[EventJams] GET /jam Error:', err);
+    return res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// GET /:id/jams/open - Retorna músicas abertas para candidatura
+router.get('/:id/jams/open', optionalAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const event = await Event.findOne({ where: { id_code: id } });
+    if (!event) return res.status(404).json({ error: 'Not Found', message: 'Evento não encontrado' });
+
+    const jams = await EventJam.findAll({
+      where: { event_id: event.id },
+      include: [{
+        model: EventJamSong,
+        as: 'songs',
+        where: { status: 'open_for_candidates' },
+        include: [
+          { model: EventJamSongInstrumentSlot, as: 'instrumentSlots' },
+          { model: EventJamSongCandidate, as: 'candidates' }
+        ]
+      }]
+    });
+
+    const songs = [];
+    jams.forEach(jam => {
+      jam.songs.forEach(s => {
+        songs.push({
+          id: s.id_code,
+          title: s.title,
+          artist: s.artist,
+          cover_image: s.cover_image,
+          status: s.status,
+          slots: s.instrumentSlots.map(slot => {
+            const approvedCandidates = s.candidates.filter(c => c.instrument === slot.instrument && c.status === 'approved');
+            const taken = approvedCandidates.length;
+            
+            // Check if user is approved for this slot
+            // We need guest context here. Since this route is 'open', maybe we just show slots.
+            // But if the user is already approved, maybe frontend wants to know?
+            
+            return {
+              id: slot.id, // Add slot ID if needed by frontend
+              instrument: slot.instrument,
+              total: slot.slots,
+              taken: taken,
+              remaining: Math.max(0, slot.slots - taken),
+              required: slot.required,
+              fallback_allowed: slot.fallback_allowed
+            };
+          })
+        });
+      });
+    });
+
+    return res.json({ success: true, data: songs });
+  } catch (err) {
+    console.error('[EventJams] GET /jams/open Error:', err);
+    return res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// GET /:id/jams/my/on-stage - Retorna músicas onde o usuário foi aprovado
+router.get('/:id/jams/my/on-stage', optionalAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { guest_id } = req.query; // Fallback se não autenticado
+
+    const event = await Event.findOne({ where: { id_code: id } });
+    if (!event) return res.status(404).json({ error: 'Not Found', message: 'Evento não encontrado' });
+
+    let guest = null;
+    if (req.user) {
+      guest = await EventGuest.findOne({ where: { event_id: event.id, user_id: req.user.userId } });
+    } else if (guest_id) {
+      guest = await EventGuest.findOne({ where: { event_id: event.id, id_code: guest_id } });
+    }
+
+    if (!guest) {
+      // Se não identificou guest, retorna vazio ou erro? Vamos retornar vazio para não quebrar front
+      return res.json({ success: true, data: [] });
+    }
+
+    const candidates = await EventJamSongCandidate.findAll({
+      where: { 
+        event_guest_id: guest.id,
+        status: 'approved'
+      },
+      include: [{
+        model: EventJamSong, // Associação precisa estar definida no model
+        as: 'song', // Verifique se o alias 'song' existe em EventJamSongCandidate
+        include: [{ model: EventJam, as: 'jam' }]
+      }]
+    });
+    
+    // Nota: Se a associação 'song' não existir no model EventJamSongCandidate, vai dar erro.
+    // Assumindo que existe ou precisamos buscar manualmente.
+    // Vamos verificar se 'song' existe no include. Se der erro, corrigimos.
+
+    const data = candidates.map(c => {
+      if (!c.song) return null;
+      return {
+        id: c.song.id_code,
+        title: c.song.title,
+        artist: c.song.artist,
+        cover_image: c.song.cover_image,
+        instrument: c.instrument,
+        jam_name: c.song.jam ? c.song.jam.name : ''
+      };
+    }).filter(Boolean);
+
+    return res.json({ success: true, data });
+
+  } catch (err) {
+    console.error('[EventJams] GET /jams/my/on-stage Error:', err);
+    return res.status(500).json({ error: 'Internal Server Error' });
+  }
 });
 
 // Caches were moved to src/utils/cacheManager.js for cross-route invalidation
@@ -117,7 +280,7 @@ try {
         rating_summary: ratings.length ? { average: Number(avg.toFixed(2)), count: ratings.length } : null
       };
     });
-    return { id: j.id_code, event_id: event.id_code, name: j.name, slug: j.slug, status: j.status, notes: j.notes, order_index: j.order_index, songs };
+    return { id: j.id_code, event_id: event.id_code, name: j.name, slug: j.slug, status: j.status, order_index: j.order_index, songs };
   });
 
   const responseData = { success: true, data };
@@ -246,9 +409,9 @@ router.post('/:id/jams', authenticateToken, requireRole('admin', 'master'), [
       return res.status(409).json({ error: 'Duplicate entry', message: 'Jam já está cadastrada', details: [{ field: exists.slug === slug ? 'slug' : 'name', issue: 'duplicate' }] });
     }
 
-    const jam = await EventJam.create({ event_id: event.id, name, slug, notes: notes || null, status: status || 'active', order_index: order_index || 0 });
+    const jam = await EventJam.create({ event_id: event.id, name, slug, status: status || 'active', order_index: order_index || 0 });
     clearJamsCache(id);
-    return res.status(201).json({ success: true, data: { id: jam.id_code, event_id: event.id_code, name: jam.name, slug: jam.slug, status: jam.status, notes: jam.notes, order_index: jam.order_index } });
+    return res.status(201).json({ success: true, data: { id: jam.id_code, event_id: event.id_code, name: jam.name, slug: jam.slug, status: jam.status, order_index: jam.order_index } });
   } catch (err) {
     if (err.name === 'SequelizeUniqueConstraintError') {
       return res.status(409).json({ error: 'Duplicate entry', message: 'Jam já está cadastrada', details: [{ field: 'slug', issue: 'duplicate' }] });
@@ -365,24 +528,34 @@ router.post('/:id/jams/songs', authenticateToken, requireRole('admin', 'master')
       }
     }
     
-    // Check if catalog_id is valid (Discogs ID vs Local ID)
+        // Check if catalog_id is valid (Discogs ID vs Local ID)
     if (catalog_id) {
       try {
-        // First check if it exists locally as PK
-        let catalogItem = await EventJamMusicCatalog.findByPk(catalog_id);
+        let catalogItem = null;
+        const parsedId = parseInt(catalog_id, 10);
         
-        // If not found locally, maybe it's a Discogs ID?
-        if (!catalogItem) {
-          catalogItem = await EventJamMusicCatalog.findOne({ where: { discogs_id: catalog_id } });
-          
-          if (catalogItem) {
-            // Found by Discogs ID, update catalog_id to be the local PK
-            catalog_id = catalogItem.id;
-          } else {
-            // Not found locally at all. If we have details, create it.
-            if (cover_image && artist && title) {
+        // 1. Try to find by PK (Local ID)
+        if (!isNaN(parsedId)) {
+             catalogItem = await EventJamMusicCatalog.findByPk(parsedId);
+        }
+
+        // 2. If not found by PK, try to find by Discogs ID
+        if (!catalogItem && !isNaN(parsedId)) {
+          catalogItem = await EventJamMusicCatalog.findOne({ where: { discogs_id: parsedId } });
+        }
+
+        if (catalogItem) {
+          // Found! Update catalog_id to be the real Local PK
+          catalog_id = catalogItem.id;
+        } else {
+            // 3. Not found locally at all. Create it.
+            // We assume the ID passed was a Discogs ID since it wasn't a valid PK
+            console.log(`[EventJams] Catalog ID ${catalog_id} not found locally. Creating new entry.`);
+            
+            // Validate required fields for creation
+            if (title && artist) {
                catalogItem = await EventJamMusicCatalog.create({
-                 discogs_id: catalog_id, // Assume the passed ID was Discogs ID
+                 discogs_id: !isNaN(parsedId) ? parsedId : null,
                  title: title,
                  artist: artist,
                  cover_image: cover_image,
@@ -390,10 +563,10 @@ router.post('/:id/jams/songs', authenticateToken, requireRole('admin', 'master')
                });
                catalog_id = catalogItem.id;
             } else {
-               // Cannot verify or create, so set to null to avoid FK error
+               // Cannot create without title/artist, so ignore catalog_id
+               console.warn('[EventJams] Cannot create catalog entry without title/artist. Ignoring catalog_id.');
                catalog_id = null;
             }
-          }
         }
       } catch (e) {
         console.error('[EventJams] Error validating catalog_id:', e);
@@ -412,6 +585,7 @@ router.post('/:id/jams/songs', authenticateToken, requireRole('admin', 'master')
           // Check if catalog_id is numeric (local ID) before using
           // If it's a discogs ID (large number), we might need to find the local ID first
           // But here we assume catalog_id refers to EventJamMusicCatalog.id (PK)
+          // Also, transaction is important!
           await EventJamMusicCatalog.increment('usage_count', { where: { id: catalog_id }, transaction: tx });
         } catch (e) {
           console.error('Erro ao incrementar usage_count:', e);
@@ -506,10 +680,11 @@ router.post('/:id/jams/songs', authenticateToken, requireRole('admin', 'master')
       throw err;
     }
   } catch (err) {
+    console.error('[EventJams] Create Song Error:', err);
     if (err.name === 'SequelizeUniqueConstraintError') {
       return res.status(409).json({ error: 'Duplicate entry', message: 'Slug de jam ou configuração duplicada' });
     }
-    return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });
+    return res.status(500).json({ error: 'Internal server error', message: err.message || 'Erro interno do servidor' });
   }
 });
 

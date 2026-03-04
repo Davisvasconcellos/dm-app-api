@@ -35,7 +35,11 @@ const EventJamMusicSuggestion = sequelize.define('EventJamMusicSuggestion', {
   },
   created_by_user_id: {
     type: DataTypes.INTEGER,
-    allowNull: false
+    allowNull: true
+  },
+  created_by_guest_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true
   },
   status: {
     type: DataTypes.ENUM('DRAFT', 'SUBMITTED', 'APPROVED', 'REJECTED'),

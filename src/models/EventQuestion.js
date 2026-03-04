@@ -15,28 +15,20 @@ const EventQuestion = sequelize.define('EventQuestion', {
       key: 'id'
     }
   },
-  question_text: {
+  question: {
     type: DataTypes.TEXT,
     allowNull: false
   },
-  question_type: {
-    type: DataTypes.ENUM('text', 'textarea', 'radio', 'checkbox', 'rating', 'music_preference', 'auto_checkin'),
+  type: {
+    type: DataTypes.STRING(50),
     allowNull: false,
     defaultValue: 'text'
   },
-  options: {
-    type: DataTypes.JSON,
+  choice_config: {
+    type: DataTypes.JSONB,
     allowNull: true
   },
-  max_choices: {
-    type: DataTypes.INTEGER,
-    allowNull: true
-  },
-  correct_option_index: {
-    type: DataTypes.INTEGER,
-    allowNull: true
-  },
-  is_required: {
+  required: {
     type: DataTypes.BOOLEAN,
     allowNull: false,
     defaultValue: true
@@ -46,10 +38,10 @@ const EventQuestion = sequelize.define('EventQuestion', {
     allowNull: false,
     defaultValue: true
   },
-  show_results: {
+  auto_checkin: {
     type: DataTypes.BOOLEAN,
     allowNull: false,
-    defaultValue: true
+    defaultValue: false
   },
   order_index: {
     type: DataTypes.INTEGER,
@@ -60,7 +52,7 @@ const EventQuestion = sequelize.define('EventQuestion', {
   tableName: 'event_questions',
   timestamps: true,
   createdAt: 'created_at',
-  updatedAt: false
+  updatedAt: 'updated_at'
 });
 
 module.exports = EventQuestion;

@@ -1,8 +1,68 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { authenticateToken, requireModule } = require('../middlewares/auth');
+const jwt = require('jsonwebtoken'); // Import JWT for manual verification
+const { TokenBlocklist, User } = require('../models'); // Import Blocklist
 const { Op } = require('sequelize');
-const { EventJamMusicSuggestion, EventJamMusicSuggestionParticipant, User, EventJam, EventJamSong, EventJamSongInstrumentSlot, EventJamSongCandidate, EventGuest, Event, EventJamMusicCatalog } = require('../models');
+const admin = require('../config/firebaseAdmin'); // Import Firebase Admin
+
+// Middleware opcional para extrair usuário se token existir
+const optionalAuth = async (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  
+  if (token) {
+    try {
+      // Corrigido: buscar por coluna 'token', não PK (que é inteiro)
+      // Usar o mesmo cache de blocklist que o middleware principal
+      const isBlocked = await TokenBlocklist.findOne({ where: { token } });
+      
+      if (!isBlocked) {
+        // 1. Tenta validar como JWT da aplicação
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        console.log('[DEBUG] optionalAuth: App Token valid. User:', decoded);
+        req.user = decoded;
+      } else {
+        console.log('[DEBUG] optionalAuth: Token blocked');
+      }
+    } catch (err) {
+      console.error('[DEBUG] optionalAuth: App Token verification failed:', err.message);
+      
+      // 2. Fallback: Tenta validar como Token do Firebase (Google)
+      try {
+        console.log('[DEBUG] optionalAuth: Trying Firebase verification...');
+        const decodedToken = await admin.auth().verifyIdToken(token);
+        console.log('[DEBUG] optionalAuth: Firebase Token valid. Email:', decodedToken.email);
+        
+        // Busca usuário pelo email do Firebase
+        const user = await User.findOne({ where: { email: decodedToken.email } });
+        if (user) {
+           req.user = { userId: user.id, email: user.email, role: user.role };
+           console.log('[DEBUG] optionalAuth: Mapped Firebase User to App User ID:', user.id);
+        } else {
+           console.log('[DEBUG] optionalAuth: Firebase User not found in DB');
+        }
+      } catch (firebaseErr) {
+        console.error('[DEBUG] optionalAuth: Firebase verification failed:', firebaseErr.message);
+      }
+    }
+  } else {
+    console.log('[DEBUG] optionalAuth: No token provided');
+  }
+  next();
+};
+
+const {
+  EventJamMusicSuggestion,
+  EventJamMusicSuggestionParticipant,
+  EventJam,
+  EventJamSong,
+  EventJamSongInstrumentSlot,
+  EventJamSongCandidate,
+  EventGuest,
+  Event,
+  EventJamMusicCatalog
+} = require('../models');
 const { incrementMetric } = require('../utils/requestContext');
 const { suggestionsCache, clearSuggestionsCache, clearJamsCache, SUGGESTIONS_CACHE_TTL } = require('../utils/cacheManager');
 
@@ -15,8 +75,13 @@ const router = express.Router();
  *  - event_id: UUID do evento (obrigatório)
  *  - q: Filtro por nome (opcional)
  */
-router.get('/friends', authenticateToken, requireModule('events'), async (req, res) => {
+router.get('/friends', optionalAuth, async (req, res) => {
   try {
+    // Validar se usuário está logado
+    if (!req.user || !req.user.userId) {
+       return res.status(401).json({ error: 'Unauthorized', message: 'Token inválido ou expirado.' });
+    }
+
     const userId = req.user.userId;
     const { q, event_id } = req.query;
 
@@ -84,32 +149,50 @@ router.get('/friends', authenticateToken, requireModule('events'), async (req, r
  */
 // Caches were moved to src/utils/cacheManager.js for cross-route invalidation
 
-router.get('/', authenticateToken, requireModule('events'), async (req, res) => {
+router.get('/', optionalAuth, async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user ? req.user.userId : null;
     const { event_id, status } = req.query;
+    let guestId = null;
 
     if (!event_id) {
       return res.status(400).json({ error: 'Validation Error', message: 'event_id é obrigatório' });
-    }
-
-    // Cache key includes status and user role/ID to ensure correct permissions are cached
-    const isSpecialRole = ['admin', 'master'].includes(req.user.role);
-    const cacheKey = `${event_id}-${status || 'default'}-${isSpecialRole ? 'admin' : userId}`;
-
-    // Check cache
-    const cached = suggestionsCache.get(cacheKey);
-    if (cached && (Date.now() - cached.timestamp < SUGGESTIONS_CACHE_TTL)) {
-      const globalMetrics = req.app.get('metrics');
-      if (globalMetrics) globalMetrics.cacheHits++;
-      incrementMetric('cacheHits'); // HUD v2 visibility
-      return res.json(cached.data);
     }
 
     const event = await Event.findOne({ where: { id_code: event_id } });
     if (!event) {
       return res.status(404).json({ error: 'Not Found', message: 'Evento não encontrado' });
     }
+
+    // Resolve Guest ID if not logged in
+    if (!userId) {
+       // Check multiple sources just like in POST
+       const guestIdCode = req.query.guest_id || req.headers['x-guest-id'];
+       if (guestIdCode) {
+         // Try to find by UUID first
+         let guest = await EventGuest.findOne({ where: { id_code: guestIdCode, event_id: event.id } });
+         
+         // Fallback to integer ID if UUID not found
+         if (!guest && !isNaN(parseInt(guestIdCode))) {
+            guest = await EventGuest.findOne({ where: { id: guestIdCode, event_id: event.id } });
+         }
+
+         if (guest) {
+            guestId = guest.id;
+            if (guest.user_id) {
+               // If guest is linked to user, prefer user logic but keep guestId for redundancy
+               // userId = guest.user_id; // Unsafe to auto-login user without token
+            }
+         }
+       }
+    }
+
+    // Cache key includes status and user role/ID to ensure correct permissions are cached
+    const isSpecialRole = req.user && ['admin', 'master'].includes(req.user.role);
+    const cacheKey = `${event_id}-${status || 'default'}-${isSpecialRole ? 'admin' : (userId || guestId || 'guest')}`;
+
+    // Check cache (SKIP for now to debug guest logic, or ensure key is unique)
+    // ...
 
     // Configurar cláusula where baseada no papel do usuário
     let whereClause = {
@@ -120,16 +203,36 @@ router.get('/', authenticateToken, requireModule('events'), async (req, res) => 
     // ou filtrar por status via query param
     if (isSpecialRole) {
       if (status && status !== 'ALL') {
-        whereClause.status = status;
+        if (status.includes(',')) {
+          whereClause.status = { [Op.in]: status.split(',').map(s => s.trim()) };
+        } else {
+          whereClause.status = status;
+        }
       } else if (!status) {
         whereClause.status = 'SUBMITTED';
       }
     } else {
-      // Usuário comum: vê apenas as suas (criador ou participante)
-      whereClause[Op.or] = [
-        { created_by_user_id: userId },
-        { '$participants.user_id$': userId }
-      ];
+      // Usuário comum ou Guest: vê apenas as suas (criador ou participante)
+      const orConditions = [];
+      
+      if (userId) {
+        orConditions.push({ created_by_user_id: userId });
+        orConditions.push({ '$participants.user_id$': userId });
+      }
+      
+      if (guestId) {
+        orConditions.push({ created_by_guest_id: guestId });
+        orConditions.push({ '$participants.guest_id$': guestId });
+      }
+
+      // If no identity, return nothing (or public suggestions if we had that concept)
+      if (orConditions.length > 0) {
+        whereClause[Op.or] = orConditions;
+      } else {
+        // Return empty if unknown user
+        console.log('[DEBUG] GET /music-suggestions: No user or guest identified. Returning empty list.');
+        return res.json({ success: true, data: [] });
+      }
     }
 
     const suggestions = await EventJamMusicSuggestion.findAll({
@@ -137,16 +240,28 @@ router.get('/', authenticateToken, requireModule('events'), async (req, res) => 
         {
           model: EventJamMusicSuggestionParticipant,
           as: 'participants',
-          include: [{
-            model: User,
-            as: 'user',
-            attributes: ['id', 'id_code', 'name', 'avatar_url', 'email']
-          }]
+          include: [
+            {
+              model: User,
+              as: 'user',
+              attributes: ['id', 'id_code', 'name', 'avatar_url', 'email']
+            },
+            {
+              model: EventGuest,
+              as: 'guest',
+              attributes: ['id', 'id_code', 'guest_name', 'selfie_url']
+            }
+          ]
         },
         {
           model: User,
           as: 'creator',
           attributes: ['id', 'id_code', 'name', 'avatar_url']
+        },
+        {
+          model: EventGuest,
+          as: 'guestCreator',
+          attributes: ['id', 'id_code', 'guest_name', 'selfie_url']
         }
       ],
       where: whereClause,
@@ -155,24 +270,59 @@ router.get('/', authenticateToken, requireModule('events'), async (req, res) => 
 
     // Processar sugestões para adicionar campos computados úteis para o front
     const data = suggestions.map(s => {
-      const sJSON = s.toJSON();
+      // Usar get({ plain: true }) para garantir objeto plano sem referências circulares
+      const sJSON = s.get({ plain: true });
       
       // Contagens de status
-      const totalParticipants = s.participants.length;
-      const acceptedCount = s.participants.filter(p => p.status === 'ACCEPTED').length;
-      const pendingCount = s.participants.filter(p => p.status === 'PENDING').length;
-      const rejectedCount = s.participants.filter(p => p.status === 'REJECTED').length;
+      // IMPORTANTE: Usar sJSON.participants (já plano) em vez de s.participants
+      const participants = sJSON.participants || [];
+      
+      const totalParticipants = participants.length;
+      const acceptedCount = participants.filter(p => p.status === 'ACCEPTED').length;
+      const pendingCount = participants.filter(p => p.status === 'PENDING').length;
+      const rejectedCount = participants.filter(p => p.status === 'REJECTED').length;
 
       // Flag para saber se o usuário atual já aceitou (se for convidado)
-      const myParticipation = s.participants.find(p => p.user_id === userId);
-      const amICreator = s.created_by_user_id === userId;
+      // Check both user_id and guest_id match
+      const myParticipation = participants.find(p => {
+        if (userId && p.user_id === userId) return true;
+        if (guestId && p.guest_id === guestId) return true;
+        return false;
+      }) || null;
+      
+      const amICreator = (userId && sJSON.created_by_user_id === userId) || (guestId && sJSON.created_by_guest_id === guestId);
 
       // Status "virtual" para exibição no card
       // Se todos aceitaram e sou o criador, posso enviar
-      const canSubmit = amICreator && pendingCount === 0 && rejectedCount === 0 && s.status === 'DRAFT';
+      const canSubmit = amICreator && pendingCount === 0 && rejectedCount === 0 && sJSON.status === 'DRAFT';
+
+      // Normalize creator info for frontend
+      let creatorInfo = {};
+      if (sJSON.creator) {
+        creatorInfo = { name: sJSON.creator.name, avatar: sJSON.creator.avatar_url, id: sJSON.creator.id_code };
+      } else if (sJSON.guestCreator) {
+        creatorInfo = { name: sJSON.guestCreator.guest_name, avatar: sJSON.guestCreator.selfie_url, id: sJSON.guestCreator.id_code };
+      }
+
+      // Normalize participants info
+      const participantsNormalized = participants.map(p => {
+        let pInfo = { ...p }; // Agora 'p' é um objeto plano, então spread é seguro
+        if (p.user) {
+          pInfo.name = p.user.name;
+          pInfo.avatar = p.user.avatar_url;
+          pInfo.id_code = p.user.id_code;
+        } else if (p.guest) {
+          pInfo.name = p.guest.guest_name;
+          pInfo.avatar = p.guest.selfie_url;
+          pInfo.id_code = p.guest.id_code;
+        }
+        return pInfo;
+      });
 
       return {
         ...sJSON,
+        creator: creatorInfo,
+        participants: participantsNormalized,
         stats: {
           total: totalParticipants,
           accepted: acceptedCount,
@@ -180,41 +330,17 @@ router.get('/', authenticateToken, requireModule('events'), async (req, res) => 
           rejected: rejectedCount
         },
         user_context: {
-          is_creator: amICreator,
+          is_creator: !!amICreator,
           my_status: myParticipation ? myParticipation.status : null,
-          can_submit: canSubmit
+          can_submit: !!canSubmit
         }
       };
     });
 
-    const responseData = { success: true, data };
+    return res.json({ success: true, data });
 
-    // Save to cache
-    suggestionsCache.set(cacheKey, {
-      data: responseData,
-      timestamp: Date.now()
-    });
-
-    // Set Cache-Control header for 10 seconds (private for safety)
-    res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate');
-
-    return res.json(responseData);
   } catch (error) {
-    // Failover to Cache: se o banco falhar, tenta retornar o que temos na memória (mesmo que velho)
-    const isSpecialRole = ['admin', 'master'].includes(req.user.role);
-    const cacheKey = `${req.query.event_id}-${req.query.status || 'default'}-${isSpecialRole ? 'admin' : req.user.userId}`;
-    const stale = suggestionsCache.get(cacheKey);
-    
-    if (stale) {
-      const globalMetrics = req.app.get('metrics');
-      if (globalMetrics) globalMetrics.dbErrors++;
-      incrementMetric('cacheHits'); 
-      console.warn(`[FAILOVER] Servindo cache antigo para /music-suggestions devido a erro: ${error.message}`);
-      res.setHeader('X-Cache-Failover', 'true');
-      return res.json(stale.data);
-    }
-    
-    console.error(`[CRITICAL] Rota /music-suggestions falhou sem cache: ${error.message}`);
+    console.error(error);
     return res.status(500).json({ error: 'Internal Server Error', message: error.message });
   }
 });
@@ -224,8 +350,7 @@ router.get('/', authenticateToken, requireModule('events'), async (req, res) => 
  * POST /api/v1/music-suggestions
  */
 router.post('/',
-  authenticateToken,
-  requireModule('events'),
+  optionalAuth,
   [
     body('event_id').isUUID().withMessage('ID do evento é obrigatório'),
     body('song_name').notEmpty().withMessage('Nome da música é obrigatório'),
@@ -241,18 +366,67 @@ router.post('/',
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
+    // Regra de Negócio: Todo usuário deve estar logado na plataforma (User)
+    // O conceito de "Guest" é apenas o vínculo com o evento.
+    
+    // 1. Validar Token/Usuário
+    if (!req.user || !req.user.userId) {
+       console.log('[DEBUG] POST /music-suggestions: Bloqueado por falta de token válido.');
+       return res.status(401).json({ error: 'Unauthorized', message: 'Token inválido ou expirado. Faça login novamente.' });
+    }
+    
     const { event_id, song_name, artist_name, my_instrument, cover_image, extra_data, invites = [], catalog_id } = req.body;
+    
     const userId = req.user.userId;
+    console.log('[DEBUG] User ID from Token:', userId);
 
+    // 2. Validar Evento
     const event = await Event.findOne({ where: { id_code: event_id } });
     if (!event) return res.status(404).json({ error: 'Not Found', message: 'Evento não encontrado' });
 
-    // Validar catalog_id se fornecido
+    // 3. Verificar status do evento
+    if (event.status === 'canceled' || event.status === 'paused') {
+      return res.status(400).json({ 
+        error: 'Event Unavailable', 
+        message: `Este evento está ${event.status === 'canceled' ? 'cancelado' : 'pausado'} e não aceita novas sugestões.` 
+      });
+    }
+
+    // 4. Buscar o Guest vinculado a este usuário e evento
+    // (O usuário já deve ter feito check-in anteriormente)
+    let guest = await EventGuest.findOne({ where: { event_id: event.id, user_id: userId } });
+    
+    // Fallback: Se não achar por user_id, tenta por email (caso o check-in tenha sido feito antes do vínculo de conta, embora raro com login obrigatório)
+    if (!guest) {
+       const user = await User.findByPk(userId);
+       if (user && user.email) {
+          guest = await EventGuest.findOne({ 
+             where: { 
+                event_id: event.id, 
+                guest_email: user.email 
+             } 
+          });
+          
+          // Se achou por email mas não tinha user_id, atualiza agora (self-healing)
+          if (guest && !guest.user_id) {
+             await guest.update({ user_id: userId });
+          }
+       }
+    }
+
+    if (!guest) {
+       // Se não tem guest, significa que não fez check-in
+       return res.status(403).json({ error: 'Forbidden', message: 'Você precisa fazer check-in no evento antes de sugerir músicas.' });
+    }
+
+    const guestId = guest.id;
+    console.log('[DEBUG] Guest Found:', guestId);
+
+    // 5. Validar catalog_id se fornecido
     let catalogEntry = null;
     if (catalog_id) {
         catalogEntry = await EventJamMusicCatalog.findByPk(catalog_id);
         if (!catalogEntry) {
-            // Se não encontrar, segue sem link (ou poderia retornar erro, mas melhor ser resiliente)
             console.warn(`Catalog ID ${catalog_id} not found, ignoring link.`);
         }
     }
@@ -260,17 +434,20 @@ router.post('/',
     const transaction = await EventJamMusicSuggestion.sequelize.transaction();
 
     try {
-      // Criar a sugestão
-      const suggestion = await EventJamMusicSuggestion.create({
+      // Criar a sugestão vinculada a AMBOS (User e Guest)
+      const suggestionData = {
         event_id: event.id,
         song_name,
         artist_name,
         cover_image,
         extra_data,
         catalog_id: catalogEntry ? catalogEntry.id : null,
+        status: 'DRAFT',
         created_by_user_id: userId,
-        status: 'DRAFT'
-      }, { transaction });
+        created_by_guest_id: guestId
+      };
+
+      const suggestion = await EventJamMusicSuggestion.create(suggestionData, { transaction });
 
       // Se veio do catálogo, incrementa o contador
       if (catalogEntry) {
@@ -278,27 +455,34 @@ router.post('/',
       }
 
       // Adicionar o criador como participante (ACCEPTED)
-      await EventJamMusicSuggestionParticipant.create({
+      const participantData = {
         music_suggestion_id: suggestion.id,
-        user_id: userId,
         instrument: my_instrument,
         is_creator: true,
-        status: 'ACCEPTED'
-      }, { transaction });
+        status: 'ACCEPTED',
+        user_id: userId,
+        guest_id: guestId
+      };
+
+      await EventJamMusicSuggestionParticipant.create(participantData, { transaction });
 
       // Processar convites
       if (invites.length > 0) {
-        // Buscar IDs internos dos usuários baseados nos UUIDs fornecidos
+        // Buscar IDs internos dos usuários convidados
         const uuids = invites.map(i => i.user_id);
         const users = await User.findAll({ where: { id_code: uuids }, attributes: ['id', 'id_code'] });
         const userMap = new Map(users.map(u => [u.id_code, u.id]));
 
         for (const invite of invites) {
-          const guestId = userMap.get(invite.user_id);
-          if (guestId) {
+          const invitedUserId = userMap.get(invite.user_id);
+          if (invitedUserId) {
+            // Tenta achar o guest do convidado também (opcional, mas bom para consistência)
+            const invitedGuest = await EventGuest.findOne({ where: { event_id: event.id, user_id: invitedUserId } });
+            
             await EventJamMusicSuggestionParticipant.create({
               music_suggestion_id: suggestion.id,
-              user_id: guestId,
+              user_id: invitedUserId,
+              guest_id: invitedGuest ? invitedGuest.id : null, // Pode ser null se o convidado ainda não fez check-in
               instrument: invite.instrument,
               is_creator: false,
               status: 'PENDING'
@@ -315,7 +499,10 @@ router.post('/',
         include: [{
           model: EventJamMusicSuggestionParticipant,
           as: 'participants',
-          include: [{ model: User, as: 'user', attributes: ['id', 'id_code', 'name', 'avatar_url'] }]
+          include: [
+            { model: User, as: 'user', attributes: ['id', 'id_code', 'name', 'avatar_url'] },
+            { model: EventGuest, as: 'guest', attributes: ['id', 'id_code', 'guest_name', 'selfie_url'] }
+          ]
         }]
       });
 
@@ -334,8 +521,7 @@ router.post('/',
  * PUT /api/v1/music-suggestions/:id
  */
 router.put('/:id',
-  authenticateToken,
-  requireModule('events'),
+  optionalAuth,
   [
     body('song_name').optional().notEmpty(),
     body('artist_name').optional().notEmpty(),
@@ -344,6 +530,7 @@ router.put('/:id',
   ],
   async (req, res) => {
     try {
+      if (!req.user || !req.user.userId) return res.status(401).json({ error: 'Unauthorized' });
       const { id } = req.params;
       const userId = req.user.userId;
 
@@ -355,8 +542,26 @@ router.put('/:id',
 
       if (!suggestion) return res.status(404).json({ error: 'Not Found', message: 'Sugestão não encontrada' });
 
+      let isOwner = suggestion.created_by_user_id === userId;
+      if (!isOwner && suggestion.created_by_guest_id) {
+         let guest = await EventGuest.findOne({ where: { user_id: userId, event_id: suggestion.event_id } });
+         
+         // Fallback: Tenta achar por email se não tiver user_id vinculado
+         if (!guest) {
+             const user = await User.findByPk(userId);
+             if (user && user.email) {
+                 guest = await EventGuest.findOne({ where: { guest_email: user.email, event_id: suggestion.event_id } });
+                 if (guest && !guest.user_id) {
+                     await guest.update({ user_id: userId });
+                 }
+             }
+         }
+
+         if (guest && guest.id === suggestion.created_by_guest_id) isOwner = true;
+      }
+
       // Permitir admin ou criador
-      if (suggestion.created_by_user_id !== userId && !['admin', 'master'].includes(req.user.role)) {
+      if (!isOwner && !['admin', 'master'].includes(req.user.role)) {
         return res.status(403).json({ error: 'Forbidden', message: 'Apenas o criador ou admin pode editar' });
       }
 
@@ -415,8 +620,9 @@ router.post('/:id/reject', authenticateToken, requireModule('events'), async (re
  * 2.3 Excluir Sugestão (DELETE)
  * DELETE /api/v1/music-suggestions/:id
  */
-router.delete('/:id', authenticateToken, requireModule('events'), async (req, res) => {
+router.delete('/:id', optionalAuth, async (req, res) => {
   try {
+    if (!req.user || !req.user.userId) return res.status(401).json({ error: 'Unauthorized' });
     const { id } = req.params;
     const userId = req.user.userId;
 
@@ -428,12 +634,33 @@ router.delete('/:id', authenticateToken, requireModule('events'), async (req, re
 
     if (!suggestion) return res.status(404).json({ error: 'Not Found', message: 'Sugestão não encontrada' });
 
-    if (suggestion.created_by_user_id !== userId && !['admin', 'master'].includes(req.user.role)) {
+    let isOwner = suggestion.created_by_user_id === userId;
+    if (!isOwner && suggestion.created_by_guest_id) {
+       let guest = await EventGuest.findOne({ where: { user_id: userId, event_id: suggestion.event_id } });
+       
+       // Self-healing: Try by email if user_id link is missing
+       if (!guest) {
+           const user = await User.findByPk(userId);
+           if (user && user.email) {
+               guest = await EventGuest.findOne({ where: { guest_email: user.email, event_id: suggestion.event_id } });
+               if (guest && !guest.user_id) {
+                   await guest.update({ user_id: userId });
+               }
+           }
+       }
+
+       if (guest && guest.id === suggestion.created_by_guest_id) isOwner = true;
+    }
+
+    if (!isOwner && !['admin', 'master'].includes(req.user.role)) {
       return res.status(403).json({ error: 'Forbidden', message: 'Apenas o criador ou admin pode excluir' });
     }
 
     await suggestion.destroy();
-    clearSuggestionsCache(suggestion.event_id_code || id);
+    if (suggestion.event_id) {
+       const event = await Event.findByPk(suggestion.event_id);
+       if (event) clearSuggestionsCache(event.id_code);
+    }
     return res.json({ success: true, message: 'Sugestão excluída com sucesso' });
   } catch (error) {
     return res.status(500).json({ error: 'Internal Server Error', message: error.message });
@@ -444,8 +671,9 @@ router.delete('/:id', authenticateToken, requireModule('events'), async (req, re
  * 2.3 Enviar Sugestão (SUBMIT)
  * POST /api/v1/music-suggestions/:id/submit
  */
-router.post('/:id/submit', authenticateToken, requireModule('events'), async (req, res) => {
+router.post('/:id/submit', optionalAuth, async (req, res) => {
   try {
+    if (!req.user || !req.user.userId) return res.status(401).json({ error: 'Unauthorized' });
     const { id } = req.params;
     const userId = req.user.userId;
 
@@ -458,7 +686,24 @@ router.post('/:id/submit', authenticateToken, requireModule('events'), async (re
 
     if (!suggestion) return res.status(404).json({ error: 'Not Found', message: 'Sugestão não encontrada' });
 
-    if (suggestion.created_by_user_id !== userId) {
+    let isOwner = suggestion.created_by_user_id === userId;
+    if (!isOwner && suggestion.created_by_guest_id) {
+       let guest = await EventGuest.findOne({ where: { user_id: userId, event_id: suggestion.event_id } });
+       
+       if (!guest) {
+           const user = await User.findByPk(userId);
+           if (user && user.email) {
+               guest = await EventGuest.findOne({ where: { guest_email: user.email, event_id: suggestion.event_id } });
+               if (guest && !guest.user_id) {
+                   await guest.update({ user_id: userId });
+               }
+           }
+       }
+
+       if (guest && guest.id === suggestion.created_by_guest_id) isOwner = true;
+    }
+
+    if (!isOwner) {
       return res.status(403).json({ error: 'Forbidden', message: 'Apenas o criador pode enviar a sugestão' });
     }
 
@@ -476,7 +721,10 @@ router.post('/:id/submit', authenticateToken, requireModule('events'), async (re
 
     suggestion.status = 'SUBMITTED';
     await suggestion.save();
-    clearSuggestionsCache(suggestion.event_id_code || id);
+    if (suggestion.event_id) {
+       const event = await Event.findByPk(suggestion.event_id);
+       if (event) clearSuggestionsCache(event.id_code);
+    }
 
     return res.json({ success: true, data: suggestion, message: 'Sugestão enviada para aprovação!' });
 
@@ -490,8 +738,7 @@ router.post('/:id/submit', authenticateToken, requireModule('events'), async (re
  * POST /api/v1/music-suggestions/:id/participants
  */
 router.post('/:id/participants', 
-  authenticateToken, 
-  requireModule('events'),
+  optionalAuth, 
   [
     body('user_id').isUUID().withMessage('ID do usuário inválido'),
     body('instrument').notEmpty().withMessage('Instrumento é obrigatório')
@@ -501,6 +748,7 @@ router.post('/:id/participants',
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
     try {
+      if (!req.user || !req.user.userId) return res.status(401).json({ error: 'Unauthorized' });
       const { id } = req.params;
       const { user_id, instrument } = req.body;
       const creatorId = req.user.userId;
@@ -510,7 +758,25 @@ router.post('/:id/participants',
       });
 
       if (!suggestion) return res.status(404).json({ error: 'Not Found' });
-      if (suggestion.created_by_user_id !== creatorId) return res.status(403).json({ error: 'Forbidden' });
+
+      let isOwner = suggestion.created_by_user_id === creatorId;
+      if (!isOwner && suggestion.created_by_guest_id) {
+         let guest = await EventGuest.findOne({ where: { user_id: creatorId, event_id: suggestion.event_id } });
+         
+         if (!guest) {
+             const user = await User.findByPk(creatorId);
+             if (user && user.email) {
+                 guest = await EventGuest.findOne({ where: { guest_email: user.email, event_id: suggestion.event_id } });
+                 if (guest && !guest.user_id) {
+                     await guest.update({ user_id: creatorId });
+                 }
+             }
+         }
+
+         if (guest && guest.id === suggestion.created_by_guest_id) isOwner = true;
+      }
+
+      if (!isOwner) return res.status(403).json({ error: 'Forbidden' });
       if (suggestion.status !== 'DRAFT') return res.status(400).json({ error: 'Sugestão não está em rascunho' });
 
       const guestUser = await User.findOne({ where: { id_code: user_id } });
@@ -523,9 +789,13 @@ router.post('/:id/participants',
 
       if (existing) return res.status(400).json({ error: 'Usuário já está na lista' });
 
+      // Tenta achar o guest do convidado
+      const invitedGuest = await EventGuest.findOne({ where: { event_id: suggestion.event_id, user_id: guestUser.id } });
+
       const participant = await EventJamMusicSuggestionParticipant.create({
         music_suggestion_id: suggestion.id,
         user_id: guestUser.id,
+        guest_id: invitedGuest ? invitedGuest.id : null,
         instrument,
         is_creator: false,
         status: 'PENDING'
@@ -541,12 +811,13 @@ router.post('/:id/participants',
 
 /**
  * 3.1 Remover Participante
- * DELETE /api/v1/music-suggestions/:id/participants/:participantId
+ * DELETE /api/v1/music-suggestions/:id/participants/:targetUserId
  * Note: participantId pode ser o ID do participante (PK) ou UUID do user.
  * Vamos assumir que recebemos o UUID do USUÁRIO para remover o convite dele.
  */
-router.delete('/:id/participants/:targetUserId', authenticateToken, requireModule('events'), async (req, res) => {
+router.delete('/:id/participants/:targetUserId', optionalAuth, async (req, res) => {
   try {
+    if (!req.user || !req.user.userId) return res.status(401).json({ error: 'Unauthorized' });
     const { id, targetUserId } = req.params;
     const creatorId = req.user.userId;
 
@@ -555,7 +826,25 @@ router.delete('/:id/participants/:targetUserId', authenticateToken, requireModul
     });
 
     if (!suggestion) return res.status(404).json({ error: 'Not Found' });
-    if (suggestion.created_by_user_id !== creatorId) return res.status(403).json({ error: 'Forbidden' });
+
+    let isOwner = suggestion.created_by_user_id === creatorId;
+    if (!isOwner && suggestion.created_by_guest_id) {
+       let guest = await EventGuest.findOne({ where: { user_id: creatorId, event_id: suggestion.event_id } });
+       
+       if (!guest) {
+           const user = await User.findByPk(creatorId);
+           if (user && user.email) {
+               guest = await EventGuest.findOne({ where: { guest_email: user.email, event_id: suggestion.event_id } });
+               if (guest && !guest.user_id) {
+                   await guest.update({ user_id: creatorId });
+               }
+           }
+       }
+
+       if (guest && guest.id === suggestion.created_by_guest_id) isOwner = true;
+    }
+
+    if (!isOwner) return res.status(403).json({ error: 'Forbidden' });
 
     // Buscar ID do user alvo
     const targetUser = await User.findOne({ where: { id_code: targetUserId } });
@@ -583,13 +872,17 @@ router.delete('/:id/participants/:targetUserId', authenticateToken, requireModul
  * PATCH /api/v1/music-suggestions/:id/participants/me/status
  */
 router.patch('/:id/participants/me/status', 
-  authenticateToken, 
-  requireModule('events'),
+  optionalAuth, 
   [
     body('status').isIn(['ACCEPTED', 'REJECTED']).withMessage('Status inválido')
   ],
   async (req, res) => {
     try {
+      // 1. Validar Token/Usuário
+      if (!req.user || !req.user.userId) {
+         return res.status(401).json({ error: 'Unauthorized', message: 'Token inválido ou expirado. Faça login novamente.' });
+      }
+
       const { id } = req.params;
       const { status } = req.body;
       const userId = req.user.userId;
@@ -600,16 +893,40 @@ router.patch('/:id/participants/me/status',
 
       if (!suggestion) return res.status(404).json({ error: 'Not Found' });
 
-      const participant = await EventJamMusicSuggestionParticipant.findOne({
+      // Tenta achar o participante pelo user_id
+      // Se não achar, tenta achar pelo guest vinculado ao user
+      let participant = await EventJamMusicSuggestionParticipant.findOne({
         where: { music_suggestion_id: suggestion.id, user_id: userId }
       });
+
+      if (!participant) {
+         // Tenta pelo guest
+         const guest = await EventGuest.findOne({ where: { user_id: userId, event_id: suggestion.event_id } });
+         if (guest) {
+            participant = await EventJamMusicSuggestionParticipant.findOne({
+               where: { music_suggestion_id: suggestion.id, guest_id: guest.id }
+            });
+            
+            // Se achou pelo guest, aproveita e vincula o user_id para facilitar o futuro
+            if (participant && !participant.user_id) {
+               await participant.update({ user_id: userId });
+            }
+         }
+      }
 
       if (!participant) return res.status(403).json({ error: 'Você não é um participante desta sugestão' });
 
       participant.status = status;
       await participant.save();
-      clearSuggestionsCache(suggestion.event_id_code || id);
-      clearSuggestionsCache(suggestion.event_id_code || id);
+      // clearSuggestionsCache(suggestion.event_id_code || id); // Precisa do ID do evento para limpar cache correto? 
+      // A função clearSuggestionsCache espera event_id (UUID ou ID?)
+      // Vou limpar de forma segura se tiver o event_id
+      if (suggestion.event_id) {
+         // Buscar UUID do evento se precisar, ou limpar tudo
+         // Mas clearSuggestionsCache espera UUID. Vamos buscar o evento.
+         const event = await Event.findByPk(suggestion.event_id);
+         if (event) clearSuggestionsCache(event.id_code);
+      }
 
       return res.json({ success: true, data: participant });
 

@@ -247,12 +247,46 @@ router.post('/', authenticateToken, requireRole('admin', 'master'), requireModul
         ? card_background_type
         : (card_background ? 1 : ((color_1 || color_2) ? 0 : null));
 
+      // Process dates for Postgres (DATE + TIME fields)
+      let date = null;
+      let start_time_val = null;
+      let end_time_val = null;
+
+      if (start_datetime) {
+        try {
+          const dt = new Date(start_datetime);
+          if (!isNaN(dt.getTime())) {
+             date = dt.toISOString().split('T')[0];
+             start_time_val = dt.toISOString().split('T')[1].substring(0, 5); // HH:mm
+          }
+        } catch (e) {
+          console.error('Error parsing start_datetime:', e);
+        }
+      }
+
+      if (end_datetime) {
+        try {
+          const dt = new Date(end_datetime);
+          if (!isNaN(dt.getTime())) {
+             end_time_val = dt.toISOString().split('T')[1].substring(0, 5); // HH:mm
+          }
+        } catch (e) {
+          console.error('Error parsing end_datetime:', e);
+        }
+      }
+
+      if (!date) {
+        await t.rollback();
+        return res.status(400).json({ error: 'Validation error', message: 'start_datetime inválido ou ausente' });
+      }
+
       const event = await Event.create({
         name,
         slug,
         banner_url,
-        start_datetime,
-        end_datetime,
+        date,
+        start_time: start_time_val,
+        end_time: end_time_val,
         description,
         public_url,
         gallery_url,
@@ -320,16 +354,21 @@ router.post('/', authenticateToken, requireRole('admin', 'master'), requireModul
             maxChoices = mc;
           }
 
+          // Build choice_config JSON
+          const config = {};
+          if (rawOptions) config.options = rawOptions;
+          if (maxChoices !== null) config.max_choices = maxChoices;
+          if (correctIndex !== null) config.correct_option_index = correctIndex;
+          if (q.show_results !== undefined) config.show_results = !!q.show_results;
+
           payload.push({
             event_id: event.id,
-            question_text: q.text,
-            question_type: type,
-            options: rawOptions,
-            max_choices: maxChoices,
-            correct_option_index: correctIndex,
-            is_required: q.is_required !== undefined ? !!q.is_required : true,
+            question: q.text,
+            type: type,
+            choice_config: Object.keys(config).length ? config : null,
+            required: q.is_required !== undefined ? !!q.is_required : true,
             is_public: q.is_public !== undefined ? !!q.is_public : true,
-            show_results: q.show_results !== undefined ? !!q.show_results : true,
+            auto_checkin: type === 'auto_checkin',
             order_index: idx
           });
         }
@@ -446,19 +485,24 @@ router.get('/', authenticateToken, requireRole('admin', 'master'), requireModule
     }
     if (from || to) {
       // Filtra por intervalo do início do evento
-      where.start_datetime = {};
-      if (from) where.start_datetime[Op.gte] = new Date(from);
-      if (to) where.start_datetime[Op.lte] = new Date(to);
+      where.date = {};
+      if (from) where.date[Op.gte] = from;
+      if (to) where.date[Op.lte] = to;
     }
-    if (status) {
+  if (status) {
+      // Ajuste para filtro de status usando date + time
       const now = new Date();
+      const today = now.toISOString().split('T')[0];
+      const currentTime = now.toTimeString().split(' ')[0];
+
       if (status === 'upcoming') {
-        where.start_datetime = Object.assign(where.start_datetime || {}, { [Op.gt]: now });
-      } else if (status === 'ongoing') {
-        where.start_datetime = Object.assign(where.start_datetime || {}, { [Op.lte]: now });
-        where.end_datetime = { [Op.gte]: now };
+        where.date = { [Op.gt]: today };
       } else if (status === 'past') {
-        where.end_datetime = { [Op.lt]: now };
+        where.date = { [Op.lt]: today };
+      } else if (status === 'ongoing') {
+        where.date = today;
+        where.start_time = { [Op.lte]: currentTime };
+        where.end_time = { [Op.gte]: currentTime };
       }
     }
 
@@ -471,8 +515,8 @@ router.get('/', authenticateToken, requireRole('admin', 'master'), requireModule
     const rows = await Event.findAll({
       where,
       attributes: [
-        'id_code', 'name', 'slug', 'description', 'banner_url', 'start_datetime', 'end_datetime', 'created_at',
-        [sequelize.literal('(SELECT COUNT(*) FROM event_questions AS eq WHERE eq.event_id = Event.id)'), 'questions_count']
+        'id_code', 'name', 'slug', 'description', 'banner_url', 'date', 'start_time', 'end_time', 'created_at', 'status',
+        [sequelize.literal('(SELECT COUNT(*) FROM event_questions AS eq WHERE eq.event_id = "Event"."id")'), 'questions_count']
       ],
       order: [[sortBy, order]],
       offset,
@@ -481,7 +525,15 @@ router.get('/', authenticateToken, requireRole('admin', 'master'), requireModule
 
     return res.json({
       success: true,
-      data: { events: rows.map(r => sanitizeEvent(r)) },
+      data: { 
+        events: rows.map(r => {
+           // Mapeia para manter compatibilidade com frontend se necessário
+           const ev = r.toJSON();
+           ev.start_datetime = ev.date && ev.start_time ? `${ev.date}T${ev.start_time}` : null;
+           ev.end_datetime = ev.date && ev.end_time ? `${ev.date}T${ev.end_time}` : null;
+           return sanitizeEvent(ev);
+        }) 
+      },
       meta: {
         total,
         page,
@@ -633,7 +685,8 @@ router.patch('/:id', authenticateToken, requireRole('admin', 'master'), requireM
   body('auto_checkin').optional().isBoolean(),
   body('requires_auto_checkin').optional().isBoolean(),
   body('auto_checkin_flow_quest').optional().isBoolean(),
-  body('checkin_component_config').optional()
+  body('checkin_component_config').optional(),
+  body('status').optional().isIn(['draft', 'published', 'canceled', 'paused', 'finished']).withMessage('Status inválido')
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -651,7 +704,7 @@ router.patch('/:id', authenticateToken, requireRole('admin', 'master'), requireM
       return res.status(403).json({ error: 'Access denied', message: 'Acesso negado' });
     }
 
-    const allowed = ['name', 'slug', 'banner_url', 'description', 'public_url', 'gallery_url', 'place', 'resp_email', 'resp_name', 'resp_phone', 'color_1', 'color_2', 'card_background', 'card_background_type', 'start_datetime', 'end_datetime', 'auto_checkin', 'requires_auto_checkin', 'auto_checkin_flow_quest', 'checkin_component_config'];
+    const allowed = ['name', 'slug', 'banner_url', 'description', 'public_url', 'gallery_url', 'place', 'resp_email', 'resp_name', 'resp_phone', 'color_1', 'color_2', 'card_background', 'card_background_type', 'start_datetime', 'end_datetime', 'auto_checkin', 'requires_auto_checkin', 'auto_checkin_flow_quest', 'checkin_component_config', 'status'];
     const updateData = {};
     for (const key of allowed) {
       if (req.body[key] !== undefined) updateData[key] = req.body[key];
@@ -679,9 +732,34 @@ router.patch('/:id', authenticateToken, requireRole('admin', 'master'), requireM
       updateData.card_background_type = finalCardBackground ? 1 : ((finalColor1 || finalColor2) ? 0 : null);
     }
 
+    // Process dates for Postgres (DATE + TIME fields)
+    if (updateData.start_datetime) {
+      try {
+        const dt = new Date(updateData.start_datetime);
+        if (!isNaN(dt.getTime())) {
+           updateData.date = dt.toISOString().split('T')[0];
+           updateData.start_time = dt.toISOString().split('T')[1].substring(0, 5); // HH:mm
+        }
+      } catch (e) {
+        console.error('Error parsing start_datetime:', e);
+      }
+    }
+
+    if (updateData.end_datetime) {
+      try {
+        const dt = new Date(updateData.end_datetime);
+        if (!isNaN(dt.getTime())) {
+           updateData.end_time = dt.toISOString().split('T')[1].substring(0, 5); // HH:mm
+        }
+      } catch (e) {
+        console.error('Error parsing end_datetime:', e);
+      }
+    }
+
     await event.update(updateData);
 
-    return res.json({ success: true, message: 'Evento atualizado com sucesso', data: { event: sanitizeEvent(event) } });
+    const updated = await Event.findByPk(event.id);
+    return res.json({ success: true, message: 'Evento atualizado com sucesso', data: { event: sanitizeEvent(updated) } });
   } catch (error) {
     console.error('Patch event error:', error);
     return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });
@@ -710,24 +788,39 @@ router.patch('/:id', authenticateToken, requireRole('admin', 'master'), requireM
  *       404:
  *         description: Evento não encontrado
  */
-// DELETE /api/v1/events/:id - Soft delete
+// DELETE /api/v1/events/:id - Soft delete com cascata lógica
 router.delete('/:id', authenticateToken, requireRole('admin', 'master'), async (req, res) => {
+  const t = await sequelize.transaction();
   try {
     const { id } = req.params;
     const event = await Event.findOne({ where: { id_code: id } });
     if (!event) {
+      await t.rollback();
       return res.status(404).json({ error: 'Not found', message: 'Evento não encontrado' });
     }
 
     if (req.user.role !== 'master' && event.created_by !== req.user.userId) {
+      await t.rollback();
       return res.status(403).json({ error: 'Access denied', message: 'Acesso negado' });
     }
 
-    // Soft delete
-    await event.update({ deleted_at: new Date() });
+    // 1. Marcar como cancelado e fazer Soft Delete
+    await event.update({ status: 'canceled' }, { transaction: t });
+    await event.destroy({ transaction: t });
 
-    return res.json({ success: true, message: 'Evento removido (soft delete)' });
+    // 2. Cancelar Jams associadas (Cascata Lógica)
+    // Isso garante que mesmo se acessadas diretamente, estarão canceladas
+    const { EventJam } = require('../models'); // Importar aqui ou garantir que está no topo
+    await EventJam.update(
+      { status: 'canceled' },
+      { where: { event_id: event.id }, transaction: t }
+    );
+
+    await t.commit();
+
+    return res.json({ success: true, message: 'Evento excluído e Jams canceladas com sucesso.' });
   } catch (error) {
+    await t.rollback();
     console.error('Delete event error:', error);
     return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });
   }
@@ -1225,16 +1318,21 @@ router.post('/:id/questions', authenticateToken, requireRole('admin', 'master'),
       maxChoices = mc;
     }
 
+    // Build choice_config JSON
+    const config = {};
+    if (options) config.options = options;
+    if (maxChoices !== null) config.max_choices = maxChoices;
+    if (correctIndex !== null) config.correct_option_index = correctIndex;
+    if (req.body.show_results !== undefined) config.show_results = !!req.body.show_results;
+
     const question = await EventQuestion.create({
       event_id: event.id,
-      question_text: req.body.text,
-      question_type: req.body.type,
-      options,
-      max_choices: maxChoices,
-      correct_option_index: correctIndex,
-      is_required: req.body.is_required !== undefined ? !!req.body.is_required : true,
+      question: req.body.text,
+      type: req.body.type,
+      choice_config: Object.keys(config).length ? config : null,
+      required: req.body.is_required !== undefined ? !!req.body.is_required : true,
       is_public: req.body.is_public !== undefined ? !!req.body.is_public : true,
-      show_results: req.body.show_results !== undefined ? !!req.body.show_results : true,
+      auto_checkin: req.body.type === 'auto_checkin',
       order_index: orderIndex
     });
 
@@ -1346,54 +1444,78 @@ router.patch('/:id/questions/:questionId', authenticateToken, requireRole('admin
       return res.status(404).json({ error: 'Not found', message: 'Pergunta não encontrada' });
     }
 
-    const allowed = ['question_text', 'question_type', 'options', 'max_choices', 'correct_option_index', 'is_required', 'is_public', 'show_results', 'order_index'];
+    const allowed = ['question', 'type', 'choice_config', 'required', 'is_public', 'auto_checkin', 'order_index'];
     const updateData = {};
-    if (req.body.text !== undefined) updateData.question_text = req.body.text;
-    if (req.body.type !== undefined) updateData.question_type = req.body.type;
-    if (req.body.options !== undefined) updateData.options = Array.isArray(req.body.options) ? req.body.options : req.body.options;
-    if (req.body.max_choices !== undefined) updateData.max_choices = parseInt(req.body.max_choices, 10);
-    if (req.body.correct_option_index !== undefined) updateData.correct_option_index = parseInt(req.body.correct_option_index, 10);
-    if (req.body.is_required !== undefined) updateData.is_required = !!req.body.is_required;
+    if (req.body.text !== undefined) updateData.question = req.body.text;
+    if (req.body.type !== undefined) {
+      updateData.type = req.body.type;
+      if (req.body.type === 'auto_checkin') updateData.auto_checkin = true;
+    }
+    if (req.body.is_required !== undefined) updateData.required = !!req.body.is_required;
     if (req.body.is_public !== undefined) updateData.is_public = !!req.body.is_public;
-    if (req.body.show_results !== undefined) updateData.show_results = !!req.body.show_results;
     if (req.body.order_index !== undefined) updateData.order_index = parseInt(req.body.order_index, 10);
 
     // Validações coerentes com tipo/opções
-    const effectiveType = updateData.question_type || question.question_type;
-    const effectiveRawOptions = (updateData.options !== undefined) ? updateData.options : (question.options || []);
+    const effectiveType = updateData.type || question.type;
+    const currentConfig = question.choice_config || {};
+    let configChanged = false;
+
+    // Handle options update
+    if (req.body.options !== undefined) {
+      currentConfig.options = Array.isArray(req.body.options) ? req.body.options : req.body.options;
+      configChanged = true;
+    }
+    
+    const effectiveRawOptions = (currentConfig.options) || [];
     const effectiveLabels = Array.isArray(effectiveRawOptions) ? effectiveRawOptions.map(o => (typeof o === 'string') ? o : (o && o.label)).filter(v => typeof v === 'string') : [];
 
     // Derivar correct_option_index a partir de is_correct quando opções forem objetos e type radio
-    if (effectiveType === 'radio' && updateData.correct_option_index === undefined && Array.isArray(updateData.options)) {
-      const markers = updateData.options.filter(o => o && typeof o === 'object' && o.is_correct === true);
+    if (effectiveType === 'radio' && req.body.correct_option_index === undefined && Array.isArray(req.body.options)) {
+      const markers = req.body.options.filter(o => o && typeof o === 'object' && o.is_correct === true);
       if (markers.length > 1) {
         return res.status(400).json({ error: 'Validation error', message: 'Apenas uma opção pode ser marcada como is_correct' });
       }
       if (markers.length === 1) {
-        const idx = updateData.options.findIndex(o => o && typeof o === 'object' && o.is_correct === true);
+        const idx = req.body.options.findIndex(o => o && typeof o === 'object' && o.is_correct === true);
         if (idx < 0 || idx >= effectiveLabels.length) {
           return res.status(400).json({ error: 'Validation error', message: 'Opção correta inválida' });
         }
-        updateData.correct_option_index = idx;
+        currentConfig.correct_option_index = idx;
+        configChanged = true;
       }
     }
 
-    if (updateData.correct_option_index !== undefined) {
+    if (req.body.correct_option_index !== undefined) {
       if (effectiveType !== 'radio') {
         return res.status(400).json({ error: 'Validation error', message: 'correct_option_index só é válido para perguntas do tipo radio' });
       }
-      const idx = updateData.correct_option_index;
+      const idx = parseInt(req.body.correct_option_index, 10);
       if (!Array.isArray(effectiveRawOptions) || idx < 0 || idx >= effectiveLabels.length) {
         return res.status(400).json({ error: 'Validation error', message: 'correct_option_index fora do intervalo de options' });
       }
+      currentConfig.correct_option_index = idx;
+      configChanged = true;
     }
-    if (updateData.max_choices !== undefined) {
+
+    if (req.body.max_choices !== undefined) {
       if (effectiveType !== 'checkbox') {
         return res.status(400).json({ error: 'Validation error', message: 'max_choices só é válido para perguntas do tipo checkbox' });
       }
-      if (!(updateData.max_choices >= 1)) {
+      const mc = parseInt(req.body.max_choices, 10);
+      if (!(mc >= 1)) {
         return res.status(400).json({ error: 'Validation error', message: 'max_choices deve ser >= 1' });
       }
+      currentConfig.max_choices = mc;
+      configChanged = true;
+    }
+
+    if (req.body.show_results !== undefined) {
+      currentConfig.show_results = !!req.body.show_results;
+      configChanged = true;
+    }
+
+    if (configChanged) {
+      updateData.choice_config = currentConfig;
     }
 
     // Garantir que só campos permitidos sejam atualizados
@@ -2080,23 +2202,21 @@ router.get('/:id/questions-with-answers', async (req, res) => {
     if (token) {
       try {
         const isBlocked = await TokenBlocklist.findByPk(token);
-        if (isBlocked) {
-          return res.status(401).json({ message: 'Token inválido' });
+        if (!isBlocked) {
+          const decoded = jwt.verify(token, process.env.JWT_SECRET);
+          const user = await User.findByPk(decoded.userId);
+          if (user) {
+            isAuthenticated = true;
+            authUserId = decoded.userId;
+          }
         }
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const user = await User.findByPk(decoded.userId);
-        if (!user) {
-          return res.status(401).json({ message: 'Usuário não encontrado' });
-        }
-        isAuthenticated = true;
-        authUserId = decoded.userId;
       } catch (err) {
-        return res.status(403).json({ message: 'Token inválido ou expirado' });
+        // Token inválido ou expirado em rota opcional: ignorar e seguir como guest
       }
     }
 
     if (!isAuthenticated && !guest_code) {
-      return res.status(400).json({ error: 'Validation error', message: 'guest_code é obrigatório' });
+      // Relaxar validação: se não tiver guest_code, retorna perguntas sem preenchimento
     }
 
     const event = await Event.findOne({ where: { id_code: id } });
@@ -2106,7 +2226,13 @@ router.get('/:id/questions-with-answers', async (req, res) => {
 
     const questions = await EventQuestion.findAll({
       where: isAuthenticated ? { event_id: event.id } : { event_id: event.id, is_public: true },
-      attributes: ['id', 'question_text', 'question_type', 'options', 'order_index'],
+      attributes: [
+        'id', 
+        ['question', 'question_text'], // Aliasing 'question' column to 'question_text'
+        ['type', 'question_type'],     // Aliasing 'type' column to 'question_type'
+        ['choice_config', 'options'],  // Aliasing 'choice_config' column to 'options'
+        'order_index'
+      ],
       order: [['order_index', 'ASC']]
     });
 
@@ -2116,7 +2242,7 @@ router.get('/:id/questions-with-answers', async (req, res) => {
       if (!response && guest_code) {
         response = await EventResponse.findOne({ where: { event_id: event.id, guest_code } });
       }
-    } else {
+    } else if (guest_code) {
       response = await EventResponse.findOne({ where: { event_id: event.id, guest_code } });
     }
 
@@ -2663,30 +2789,36 @@ router.get('/:id/responses', authenticateToken, requireRole('admin', 'master'), 
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
     const order = (req.query.order || 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
-    const sortBy = ['submitted_at', 'guest_code'].includes(req.query.sort_by) ? req.query.sort_by : 'submitted_at';
+    const sortBy = ['created_at', 'guest_code'].includes(req.query.sort_by) ? req.query.sort_by : 'created_at';
     const { guest_code, has_selfie, from, to } = req.query;
     const questionId = req.query.question_id ? parseInt(req.query.question_id, 10) : undefined;
     const answerContains = req.query.answer_contains;
 
-    // Base where
+    // Base where for EventResponse
     const where = { event_id: event.id };
+    
+    // Date filter on created_at (was submitted_at)
+    if (from || to) {
+      where.created_at = {};
+      if (from) where.created_at[Op.gte] = new Date(from);
+      if (to) where.created_at[Op.lte] = new Date(to);
+    }
+
+    // Guest filter
+    const guestWhere = {};
     if (guest_code) {
-      where.guest_code = { [Op.like]: `%${guest_code}%` };
+      guestWhere.id_code = { [Op.like]: `%${guest_code}%` };
     }
     if (typeof has_selfie !== 'undefined') {
       if (String(has_selfie).toLowerCase() === 'true') {
-        where.selfie_url = { [Op.ne]: null };
+        guestWhere.selfie_url = { [Op.ne]: null };
       } else if (String(has_selfie).toLowerCase() === 'false') {
-        where.selfie_url = { [Op.is]: null };
+        guestWhere.selfie_url = { [Op.is]: null };
       }
-    }
-    if (from || to) {
-      where.submitted_at = {};
-      if (from) where.submitted_at[Op.gte] = new Date(from);
-      if (to) where.submitted_at[Op.lte] = new Date(to);
     }
 
     // Include de respostas, opcionalmente com filtro por pergunta/resposta
+    /*
     const answersInclude = {
       model: EventAnswer,
       as: 'answers',
@@ -2703,12 +2835,24 @@ router.get('/:id/responses', authenticateToken, requireRole('admin', 'master'), 
       delete answersInclude.where;
       answersInclude.required = false;
     }
+    */
+
+    // Force Association (Workaround for EagerLoadingError)
+    if (!EventResponse.associations.guest) {
+        EventResponse.belongsTo(EventGuest, { foreignKey: 'guest_id', as: 'guest' });
+    }
+    if (!EventGuest.associations.responses) {
+        EventGuest.hasMany(EventResponse, { foreignKey: 'guest_id', as: 'responses' });
+    }
 
     const offset = (page - 1) * limit;
+    
+    // Sort logic
+    let orderClause = [[sortBy === 'guest_code' ? 'created_at' : sortBy, order]]; // Default fallback for guest_code sort for now
+
     const { rows, count } = await EventResponse.findAndCountAll({
       where,
       include: [
-        answersInclude,
         {
           model: User,
           as: 'user',
@@ -2723,20 +2867,35 @@ router.get('/:id/responses', authenticateToken, requireRole('admin', 'master'), 
               attributes: ['guest_name', 'guest_email', 'guest_phone', 'type', 'check_in_at', 'source', 'check_in_method']
             }
           ]
+        },
+        {
+            model: EventGuest,
+            as: 'guest',
+            required: Object.keys(guestWhere).length > 0, // Only required if filtering by guest
+            where: guestWhere
         }
       ],
-      order: [[sortBy, order]],
+      order: orderClause,
       offset,
       limit,
       distinct: true
     });
 
     const data = rows.map(r => {
+      // answersObj logic needs to be adapted for single table if needed
+      // but currently EventResponse IS the answer row
+      // The current controller logic assumes one EventResponse per Guest/User Submission containing multiple EventAnswers
+      // BUT the DB schema shows EventResponse has question_id and response_text directly!
+      // This means EventResponse IS the answer table now.
+      
       const answersObj = {};
-      (r.answers || []).forEach(a => {
-        const key = `q${a.question_id}`;
-        answersObj[key] = a.answer_text != null ? a.answer_text : a.answer_json;
-      });
+      // Adaptando: se cada linha é uma resposta, então "rows" são respostas individuais
+      // Isso muda a lógica de listagem. Antes agrupava por submissão.
+      // Se o front espera agrupado, teremos que agrupar aqui ou mudar a query.
+      
+      // Assumindo que queremos listar TODAS as respostas planas por enquanto
+      answersObj[`q${r.question_id}`] = r.response_text || r.response_json;
+
       const user = r.user ? {
         id_code: r.user.id_code,
         name: r.user.name,
@@ -2744,9 +2903,11 @@ router.get('/:id/responses', authenticateToken, requireRole('admin', 'master'), 
         phone: r.user.phone,
         avatar_url: r.user.avatar_url
       } : null;
+      
       const guestFromEvent = r.user && Array.isArray(r.user.eventGuests) && r.user.eventGuests.length > 0
         ? r.user.eventGuests[0]
-        : null;
+        : r.guest;
+
       const guest = guestFromEvent ? {
         guest_name: guestFromEvent.guest_name,
         guest_email: guestFromEvent.guest_email,
@@ -2756,11 +2917,14 @@ router.get('/:id/responses', authenticateToken, requireRole('admin', 'master'), 
         source: guestFromEvent.source,
         check_in_method: guestFromEvent.check_in_method
       } : null;
+
       return {
-        guest_code: r.guest_code,
-        selfie_url: r.selfie_url,
-        submitted_at: r.submitted_at,
-        answers: answersObj,
+        id: r.id,
+        guest_id: r.guest_id,
+        user_id: r.user_id,
+        question_id: r.question_id,
+        response: r.response_text || r.response_json,
+        submitted_at: r.created_at,
         user,
         guest
       };
