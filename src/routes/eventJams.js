@@ -154,62 +154,7 @@ router.get('/:id/jams/open', optionalAuth, async (req, res) => {
   }
 });
 
-// GET /:id/jams/my/on-stage - Retorna músicas onde o usuário foi aprovado
-router.get('/:id/jams/my/on-stage', optionalAuth, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { guest_id } = req.query; // Fallback se não autenticado
 
-    const event = await Event.findOne({ where: { id_code: id } });
-    if (!event) return res.status(404).json({ error: 'Not Found', message: 'Evento não encontrado' });
-
-    let guest = null;
-    if (req.user) {
-      guest = await EventGuest.findOne({ where: { event_id: event.id, user_id: req.user.userId } });
-    } else if (guest_id) {
-      guest = await EventGuest.findOne({ where: { event_id: event.id, id_code: guest_id } });
-    }
-
-    if (!guest) {
-      // Se não identificou guest, retorna vazio ou erro? Vamos retornar vazio para não quebrar front
-      return res.json({ success: true, data: [] });
-    }
-
-    const candidates = await EventJamSongCandidate.findAll({
-      where: { 
-        event_guest_id: guest.id,
-        status: 'approved'
-      },
-      include: [{
-        model: EventJamSong, // Associação precisa estar definida no model
-        as: 'song', // Verifique se o alias 'song' existe em EventJamSongCandidate
-        include: [{ model: EventJam, as: 'jam' }]
-      }]
-    });
-    
-    // Nota: Se a associação 'song' não existir no model EventJamSongCandidate, vai dar erro.
-    // Assumindo que existe ou precisamos buscar manualmente.
-    // Vamos verificar se 'song' existe no include. Se der erro, corrigimos.
-
-    const data = candidates.map(c => {
-      if (!c.song) return null;
-      return {
-        id: c.song.id_code,
-        title: c.song.title,
-        artist: c.song.artist,
-        cover_image: c.song.cover_image,
-        instrument: c.instrument,
-        jam_name: c.song.jam ? c.song.jam.name : ''
-      };
-    }).filter(Boolean);
-
-    return res.json({ success: true, data });
-
-  } catch (err) {
-    console.error('[EventJams] GET /jams/my/on-stage Error:', err);
-    return res.status(500).json({ error: 'Internal Server Error' });
-  }
-});
 
 // Caches were moved to src/utils/cacheManager.js for cross-route invalidation
 
@@ -891,9 +836,31 @@ router.get('/:id/jams/my/on-stage', authenticateToken, async (req, res) => {
 
   const nowPlaying = globalQueue.length > 0 ? formatSong(globalQueue[0], 1) : null;
   const myUpcoming = globalQueue.map((s, i) => {
+    // If it's the first song (now playing), check if it's mine too.
+    // The user wants to know if they are on stage NOW or UPCOMING.
+    // So 'my_upcoming' should probably be 'my_songs' or we separate 'my_now_playing' and 'my_queue'.
+    // The current logic skips index 0 for my_upcoming, assuming index 0 is 'now_playing'.
+    // But if I am in 'now_playing', I want to know.
+    
+    // Let's keep 'now_playing' as the general Stage song.
+    // And 'my_upcoming' as the list of songs I am approved for (including the one on stage if applicable, or maybe strictly upcoming).
+    // The previous logic was:
+    /*
     if (i === 0) return null;
+    const isMine = ...
+    */
+    
+    // If the requirement is "listar as músicas que estão no palco para a home dos usuários", 
+    // it usually implies "What is currently playing?" (General) AND "When do I play?" (Personal).
+    
+    // Let's include ALL my approved songs in 'my_upcoming' (or rename to 'my_songs' in front, but keep key for compatibility),
+    // potentially marking them as 'on_stage' or 'in_queue'.
+    
     const isMine = (s.candidates || []).some(c => c.event_guest_id === guest.id && c.status === 'approved');
     if (!isMine) return null;
+    
+    // If it is the first song, it is ON STAGE.
+    // If it is later, it is UPCOMING.
     return formatSong(s, i + 1);
   }).filter(Boolean);
 
