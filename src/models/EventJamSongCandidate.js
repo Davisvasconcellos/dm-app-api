@@ -11,10 +11,13 @@ const EventJamSongCandidate = sequelize.define('EventJamSongCandidate', {
   status: { type: DataTypes.ENUM('pending','approved','rejected'), allowNull: false, defaultValue: 'pending' },
   applied_at: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW },
   approved_at: { type: DataTypes.DATE, allowNull: true },
-  approved_by_user_id: { type: DataTypes.INTEGER, allowNull: true }
+  approved_by_user_id: { type: DataTypes.INTEGER, allowNull: true },
+  updated_at: { type: DataTypes.DATE, allowNull: true }
 }, {
   tableName: 'event_jam_song_candidates',
-  timestamps: false
+  timestamps: true,
+  createdAt: 'applied_at',
+  updatedAt: 'updated_at'
 });
 
 module.exports = EventJamSongCandidate;

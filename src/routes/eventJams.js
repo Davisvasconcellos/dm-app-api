@@ -111,27 +111,87 @@ router.get('/:id/jams/open', optionalAuth, async (req, res) => {
         where: { status: 'open_for_candidates' },
         include: [
           { model: EventJamSongInstrumentSlot, as: 'instrumentSlots' },
-          { model: EventJamSongCandidate, as: 'candidates' }
+          { 
+            model: EventJamSongCandidate, 
+            as: 'candidates',
+            include: [{ model: EventGuest, as: 'guest', include: [{ model: User, as: 'user' }] }] 
+          }
         ]
       }]
     });
 
+    // Identify current user guest if logged in
+    let currentGuestId = null;
+    
+    // Manual token extraction fallback
+    let authUser = req.user;
+    if (!authUser) {
+        const authHeader = req.headers['authorization'];
+        const token = authHeader && authHeader.split(' ')[1];
+        if (token) {
+            try {
+                const decoded = jwt.verify(token, process.env.JWT_SECRET);
+                authUser = decoded;
+            } catch (e) {
+                console.error('[EventJams] Token manual decode failed:', e.message);
+            }
+        }
+    }
+
+    if (authUser && authUser.userId) {
+       // DIRECT LOOKUP: Find Guest by user_id (int)
+       // We trust the JWT userId (int) is correct.
+       // We look for a guest in this event that is linked to this user_id.
+       const guest = await EventGuest.findOne({ where: { event_id: event.id, user_id: authUser.userId } });
+       
+       if (guest) {
+            currentGuestId = guest.id;
+       } else {
+            console.warn(`[EventJams] Guest not found for UserID ${authUser.userId} in EventID ${event.id}`);
+       }
+    } else {
+       // Fallback for guest mode if guest_id is provided in query/header (optional)
+       const guestIdCode = req.query.guest_id || req.headers['x-guest-id'];
+       if (guestIdCode) {
+           const guest = await EventGuest.findOne({ where: { event_id: event.id, id_code: guestIdCode } });
+           if (guest) currentGuestId = guest.id;
+       }
+    }
+
     const songs = [];
     jams.forEach(jam => {
       jam.songs.forEach(s => {
+        // Find if user has applied to any slot in this song
+        let myApplication = null;
+        if (currentGuestId) {
+            // Find in candidates list. Important: Sequelize objects need .get() or plain check if raw.
+            // s.candidates is an array of Sequelize instances.
+            const app = s.candidates.find(c => {
+                const cGuestId = c.event_guest_id || (c.get ? c.get('event_guest_id') : null);
+                return String(cGuestId) === String(currentGuestId); // Ensure type consistency
+            });
+            
+            if (app) {
+                myApplication = {
+                    id: app.id_code || (app.get ? app.get('id_code') : null),
+                    instrument: app.instrument || (app.get ? app.get('instrument') : null),
+                    status: app.status || (app.get ? app.get('status') : null)
+                };
+            }
+        }
+
         songs.push({
           id: s.id_code,
           title: s.title,
           artist: s.artist,
           cover_image: s.cover_image,
           status: s.status,
+          my_application: myApplication, // Add this field
           slots: s.instrumentSlots.map(slot => {
-            const approvedCandidates = s.candidates.filter(c => c.instrument === slot.instrument && c.status === 'approved');
-            const taken = approvedCandidates.length;
+            const slotCandidates = s.candidates.filter(c => c.instrument === slot.instrument);
             
-            // Check if user is approved for this slot
-            // We need guest context here. Since this route is 'open', maybe we just show slots.
-            // But if the user is already approved, maybe frontend wants to know?
+            const approvedCandidates = slotCandidates.filter(c => c.status === 'approved');
+            const taken = approvedCandidates.length;
             
             return {
               id: slot.id, // Add slot ID if needed by frontend
