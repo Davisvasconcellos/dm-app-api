@@ -2,7 +2,7 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
 const { Op } = require('sequelize');
-const { User, Plan, TokenBlocklist, FootballTeam } = require('../models');
+const { User, Plan, TokenBlocklist, FootballTeam, Organization, Store, StoreMember } = require('../models');
 const { authenticateToken } = require('../middlewares/auth');
 const admin = require('../config/firebaseAdmin');
 
@@ -78,6 +78,22 @@ router.post('/login', [
           as: 'modules',
           attributes: ['id', 'id_code', 'name', 'slug', 'active'],
           through: { attributes: [] }
+        },
+        {
+          model: Organization,
+          as: 'ownedOrganizations',
+          attributes: ['id_code', 'name', 'plan_tier'],
+          include: [{ model: Store, as: 'stores', attributes: ['id_code', 'name', 'slug'] }]
+        },
+        {
+          model: StoreMember,
+          as: 'storeMemberships',
+          include: [{ 
+            model: Store, 
+            as: 'store',
+            attributes: ['id_code', 'name', 'slug'],
+            include: [{ model: Organization, as: 'organization', attributes: ['id_code', 'name'] }] 
+          }]
         }
       ]
     });
@@ -178,6 +194,22 @@ router.post('/google', [
         model: FootballTeam,
         as: 'team',
         attributes: ['name', 'short_name', 'abbreviation', 'shield']
+      },
+      {
+        model: Organization,
+        as: 'ownedOrganizations',
+        attributes: ['id_code', 'name', 'plan_tier'],
+        include: [{ model: Store, as: 'stores', attributes: ['id_code', 'name', 'slug'] }]
+      },
+      {
+        model: StoreMember,
+        as: 'storeMemberships',
+        include: [{ 
+          model: Store, 
+          as: 'store',
+          attributes: ['id_code', 'name', 'slug'],
+          include: [{ model: Organization, as: 'organization', attributes: ['id_code', 'name'] }] 
+        }]
       }
     ];
 
@@ -382,6 +414,22 @@ router.get('/me', authenticateToken, async (req, res) => {
           as: 'modules',
           attributes: ['id', 'id_code', 'name', 'slug', 'active'],
           through: { attributes: [] }
+        },
+        {
+          model: Organization,
+          as: 'ownedOrganizations',
+          attributes: ['id_code', 'name', 'plan_tier'],
+          include: [{ model: Store, as: 'stores', attributes: ['id_code', 'name', 'slug'] }]
+        },
+        {
+          model: StoreMember,
+          as: 'storeMemberships',
+          include: [{ 
+            model: Store, 
+            as: 'store',
+            attributes: ['id_code', 'name', 'slug'],
+            include: [{ model: Organization, as: 'organization', attributes: ['id_code', 'name'] }] 
+          }]
         }
       ]
     });

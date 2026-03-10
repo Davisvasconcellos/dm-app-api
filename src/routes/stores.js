@@ -255,21 +255,22 @@ router.post('/',
     body('name').trim().isLength({ min: 2, max: 255 }).withMessage('Nome deve ter entre 2 e 255 caracteres'),
     body('email').isEmail().withMessage('Email inválido'),
     body('cnpj').isLength({ min: 14, max: 18 }).withMessage('CNPJ inválido'),
-    body('logo_url').optional().isURL({ require_tld: false }).withMessage('URL do logo inválida'),
-    body('instagram_handle').optional().trim().isLength({ max: 100 }).withMessage('Instagram deve ter no máximo 100 caracteres'),
-    body('facebook_handle').optional().trim().isLength({ max: 100 }).withMessage('Facebook deve ter no máximo 100 caracteres'),
+    body('logo_url').optional({ checkFalsy: true }).isURL({ require_tld: false }).withMessage('URL do logo inválida'),
+    body('instagram_handle').optional({ checkFalsy: true }).trim().isLength({ max: 100 }).withMessage('Instagram deve ter no máximo 100 caracteres'),
+    body('facebook_handle').optional({ checkFalsy: true }).trim().isLength({ max: 100 }).withMessage('Facebook deve ter no máximo 100 caracteres'),
     // Novas validações
     body('capacity').optional().isInt({ min: 0 }).withMessage('Capacidade deve ser um número inteiro positivo'),
-    body('type').optional().isIn(['bar', 'restaurante', 'pub', 'cervejaria', 'casa noturna', 'distribuidora']).withMessage('Tipo de estabelecimento inválido'),
+    body('type').optional().isString().trim(),
     body('legal_name').optional().isString().trim(),
     body('phone').optional().isString().trim(),
     body('address_street').optional().isString().trim(),
     body('address_neighborhood').optional().isString().trim(),
+    body('address_city').optional().isString().trim(),
     body('address_state').optional().isString().trim().isLength({ min: 2, max: 2 }).withMessage('UF deve ter 2 caracteres'),
     body('address_number').optional().isString().trim(),
     body('address_complement').optional().isString().trim(),
-    body('banner_url').optional().isURL({ require_tld: false }).withMessage('URL do banner inválida'),
-    body('website').optional().isURL({ require_tld: false }).withMessage('URL do site inválida'),
+    body('banner_url').optional({ checkFalsy: true }).isURL({ require_tld: false }).withMessage('URL do banner inválida'),
+    body('website').optional({ checkFalsy: true }).isURL({ require_tld: false }).withMessage('URL do site inválida'),
     body('latitude').optional().isDecimal().withMessage('Latitude inválida'),
     body('longitude').optional().isDecimal().withMessage('Longitude inválida'),
     body('zip_code').optional().isString().trim(), // Movido para manter a ordem
@@ -302,6 +303,7 @@ router.post('/',
         phone,
         address_street,
         address_neighborhood,
+        address_city,
         address_state,
         address_number,
         address_complement,
@@ -339,6 +341,7 @@ router.post('/',
           zip_code,
           address_street,
           address_neighborhood,
+          city: address_city, // Mapeia address_city para city
           address_state,
           address_number,
           address_complement,
@@ -456,21 +459,22 @@ router.put('/:id_code', authenticateToken, requireRole(['admin', 'manager']), [
     body('name').optional().trim().isLength({ min: 2, max: 255 }).withMessage('Nome deve ter entre 2 e 255 caracteres'),
     body('email').optional().isEmail().withMessage('Email inválido'),
     body('cnpj').optional().isLength({ min: 14, max: 18 }).withMessage('CNPJ inválido'),
-    body('logo_url').optional().isURL({ require_tld: false }).withMessage('URL do logo inválida'),
-    body('instagram_handle').optional().trim().isLength({ max: 100 }).withMessage('Instagram deve ter no máximo 100 caracteres'),
-    body('facebook_handle').optional().trim().isLength({ max: 100 }).withMessage('Facebook deve ter no máximo 100 caracteres'),
+    body('logo_url').optional({ checkFalsy: true }).isURL({ require_tld: false }).withMessage('URL do logo inválida'),
+    body('instagram_handle').optional({ checkFalsy: true }).trim().isLength({ max: 100 }).withMessage('Instagram deve ter no máximo 100 caracteres'),
+    body('facebook_handle').optional({ checkFalsy: true }).trim().isLength({ max: 100 }).withMessage('Facebook deve ter no máximo 100 caracteres'),
     // Novos campos
     body('capacity').optional().isInt({ min: 0 }).withMessage('Capacidade deve ser um número inteiro positivo'),
-    body('type').optional().isIn(['bar', 'restaurante', 'pub', 'cervejaria', 'casa noturna', 'distribuidora']).withMessage('Tipo de estabelecimento inválido'),
+    body('type').optional().isString().trim(),
     body('legal_name').optional().isString().trim(),
     body('phone').optional().isString().trim(),
     body('address_street').optional().isString().trim(),
     body('address_neighborhood').optional().isString().trim(),
+    body('address_city').optional().isString().trim(),
     body('address_state').optional().isString().trim().isLength({ min: 2, max: 2 }).withMessage('UF deve ter 2 caracteres'),
     body('address_number').optional().isString().trim(),
     body('address_complement').optional().isString().trim(),
-    body('banner_url').optional().isURL({ require_tld: false }).withMessage('URL do banner inválida'),
-    body('website').optional().isURL({ require_tld: false }).withMessage('URL do site inválida'),
+    body('banner_url').optional({ checkFalsy: true }).isURL({ require_tld: false }).withMessage('URL do banner inválida'),
+    body('website').optional({ checkFalsy: true }).isURL({ require_tld: false }).withMessage('URL do site inválida'),
     body('latitude').optional().isDecimal().withMessage('Latitude inválida'),
     body('longitude').optional().isDecimal().withMessage('Longitude inválida'),
     body('zip_code').optional().isString().trim(), // Movido para manter a ordem
@@ -519,24 +523,41 @@ router.put('/:id_code', authenticateToken, requireRole(['admin', 'manager']), [
       const isCnpjUpdateAttempt = req.body.cnpj && req.body.cnpj !== store.cnpj;
 
       if (isCnpjUpdateAttempt) {
-        // REGRA 1: Apenas 'master' pode TENTAR alterar o CNPJ.
-        if (req.user.role !== 'master') {
-          return res.status(403).json({
-            error: 'Forbidden',
-            message: 'Apenas um usuário master pode alterar o CNPJ.'
-          });
-        }
+        // Se a loja não tem CNPJ (primeira vez), permite atualizar.
+        // Se a loja JÁ TEM CNPJ, apenas 'master' pode alterar.
+        const storeHasCnpj = store.cnpj && store.cnpj.trim() !== '';
 
-        // REGRA 2: Se for master, verificar se o NOVO CNPJ já existe em outra loja.
-        const existingStore = await Store.findOne({ where: { cnpj: req.body.cnpj } });
-        if (existingStore) {
-          return res.status(400).json({ error: 'Validation error', message: 'CNPJ já utilizado por outra loja.' });
+        if (storeHasCnpj && req.user.role !== 'master') {
+            // Ignora a tentativa de atualização (mantém o CNPJ antigo) sem lançar erro
+            delete req.body.cnpj;
+        } else {
+            // Se for permitido (master ou primeira vez), verifica duplicidade
+            const existingStore = await Store.findOne({ where: { cnpj: req.body.cnpj } });
+            // Se achar outra loja com esse CNPJ (e não for a mesma loja), erro
+            if (existingStore && existingStore.id !== store.id) {
+                return res.status(400).json({ error: 'Validation error', message: 'CNPJ já utilizado por outra loja.' });
+            }
         }
+      } else {
+        // Se não for uma tentativa de update (mesmo valor ou vazio), remove para evitar re-processamento desnecessário
+        delete req.body.cnpj; 
       }
 
       // Se não for master, remove o campo CNPJ do corpo da requisição para garantir que ele não seja atualizado.
+      // (Isso já foi tratado acima, mas mantemos a segurança extra caso a lógica acima falhe ou seja alterada)
+      // Mas espere, se for a primeira vez, precisamos PERMITIR que req.body.cnpj passe.
+      // Então a lógica acima já deletou se não podia. Aqui não devemos deletar incondicionalmente.
+      
+      // Código antigo removido:
+      /*
       if (req.user.role !== 'master') {
         delete req.body.cnpj;
+      }
+      */
+
+      // Mapear address_city para city
+      if (req.body.address_city) {
+        req.body.city = req.body.address_city;
       }
 
       await store.update(req.body);

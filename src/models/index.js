@@ -34,8 +34,28 @@ const SysModule = require('./SysModule');
 const EventJamMusicSuggestion = require('./EventJamMusicSuggestion');
 const EventJamMusicSuggestionParticipant = require('./EventJamMusicSuggestionParticipant');
 const EventJamMusicCatalog = require('./EventJamMusicCatalog');
+const Organization = require('./Organization');
+const StoreMember = require('./StoreMember');
 
 // Define associations
+
+// Organization Associations
+Organization.belongsTo(User, { foreignKey: 'owner_id', as: 'owner' });
+User.hasMany(Organization, { foreignKey: 'owner_id', as: 'ownedOrganizations' });
+
+Organization.hasMany(Store, { foreignKey: 'organization_id', as: 'stores' });
+Store.belongsTo(Organization, { foreignKey: 'organization_id', as: 'organization' });
+
+// StoreMember Associations (Pivot)
+Store.hasMany(StoreMember, { foreignKey: 'store_id', as: 'memberships' });
+StoreMember.belongsTo(Store, { foreignKey: 'store_id', as: 'store' });
+
+User.hasMany(StoreMember, { foreignKey: 'user_id', as: 'storeMemberships' });
+StoreMember.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+
+// Many-to-Many Store <-> User via StoreMember
+Store.belongsToMany(User, { through: StoreMember, foreignKey: 'store_id', otherKey: 'user_id', as: 'members' });
+User.belongsToMany(Store, { through: StoreMember, foreignKey: 'user_id', otherKey: 'store_id', as: 'memberStores' });
 
 // SysModule Associations
 SysModule.associate({ User });
@@ -293,4 +313,6 @@ module.exports = {
   ,EventJamMusicSuggestion
   ,EventJamMusicSuggestionParticipant
   ,EventJamMusicCatalog
+  ,Organization
+  ,StoreMember
 };

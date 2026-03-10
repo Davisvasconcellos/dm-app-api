@@ -1,6 +1,6 @@
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../config/database');
-const { v4: uuidv4 } = require('uuid'); // Garante que o uuid está importado
+const { v4: uuidv4 } = require('uuid');
 
 const Store = sequelize.define('Store', {
   id: {
@@ -9,140 +9,74 @@ const Store = sequelize.define('Store', {
     autoIncrement: true
   },
   id_code: {
-    type: DataTypes.STRING(255),
-    allowNull: true, // Permitir nulo temporariamente para o hook funcionar
-    unique: true
-  },
-  name: {
-    type: DataTypes.STRING(255),
+    type: DataTypes.STRING(36),
     allowNull: false,
-    validate: {
-      notEmpty: true,
-      len: [1, 255]
-    }
+    unique: true,
+    defaultValue: uuidv4
+  },
+  organization_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true // Will be migrated to false later
+    // References Organization model
   },
   owner_id: {
     type: DataTypes.INTEGER,
-    allowNull: true,
-    references: {
-      model: 'users',
-      key: 'id'
-    }
+    allowNull: true // Legacy field, eventually replaced by organization owner
   },
-  email: {
+  name: {
     type: DataTypes.STRING(255),
-    allowNull: true,
-    validate: {
-      isEmail: true
-    }
+    allowNull: false
   },
-  capacity: {
-    type: DataTypes.INTEGER,
-    allowNull: true
-  },
-  type: {
-    type: DataTypes.ENUM('bar', 'restaurante', 'pub', 'cervejaria', 'casa noturna'),
-    allowNull: true
-  },
-  legal_name: {
-    type: DataTypes.STRING,
-    allowNull: true
-  },
-  phone: {
-    type: DataTypes.STRING(20),
-    allowNull: true
-  },
-  zip_code: {
-    type: DataTypes.STRING(10),
-    allowNull: true
-  },
-  address_street: {
-    type: DataTypes.STRING,
-    allowNull: true
-  },
-  address_neighborhood: {
-    type: DataTypes.STRING,
-    allowNull: true
-  },
-  address_state: {
-    type: DataTypes.STRING(2),
-    allowNull: true
-  },
-  address_number: {
-    type: DataTypes.STRING(20),
-    allowNull: true
-  },
-  address_complement: {
-    type: DataTypes.STRING,
-    allowNull: true
-  },
-  banner_url: {
-    type: DataTypes.STRING,
-    allowNull: true,
-  },
-  website: {
-    type: DataTypes.STRING,
-    allowNull: true,
-  },
-  latitude: {
-    type: DataTypes.DECIMAL(10, 8),
-    allowNull: true
-  },
-  longitude: {
-    type: DataTypes.DECIMAL(11, 8),
-    allowNull: true
-  },
-  cnpj: {
-    type: DataTypes.STRING(20),
-    allowNull: true
-  },
-  logo_url: {
+  slug: {
     type: DataTypes.STRING(255),
-    allowNull: true,
+    allowNull: true, // Legacy stores might not have slug initially
+    unique: true
   },
-  instagram_handle: {
-    type: DataTypes.STRING(100),
-    allowNull: true
+  // Contact & Social
+  email: { type: DataTypes.STRING(255), allowNull: true },
+  phone: { type: DataTypes.STRING(255), allowNull: true },
+  website: { type: DataTypes.STRING(255), allowNull: true },
+  instagram_handle: { type: DataTypes.STRING(255), allowNull: true },
+  facebook_handle: { type: DataTypes.STRING(255), allowNull: true },
+  
+  // Legal & Info
+  cnpj: { type: DataTypes.STRING(255), allowNull: true },
+  legal_name: { type: DataTypes.STRING(255), allowNull: true },
+  description: { type: DataTypes.TEXT, allowNull: true },
+  capacity: { type: DataTypes.INTEGER, allowNull: true },
+  type: { type: DataTypes.STRING(255), allowNull: true }, // e.g., 'pub', 'restaurant'
+
+  // Address
+  city: { type: DataTypes.STRING(255), allowNull: true },
+  address: { type: DataTypes.STRING(500), allowNull: true },
+  zip_code: { type: DataTypes.STRING(255), allowNull: true },
+  address_street: { type: DataTypes.STRING(255), allowNull: true },
+  address_number: { type: DataTypes.STRING(255), allowNull: true },
+  address_complement: { type: DataTypes.STRING(255), allowNull: true },
+  address_neighborhood: { type: DataTypes.STRING(255), allowNull: true },
+  address_state: { type: DataTypes.STRING(255), allowNull: true },
+  latitude: { type: DataTypes.DECIMAL(10, 8), allowNull: true },
+  longitude: { type: DataTypes.DECIMAL(11, 8), allowNull: true },
+
+  // Media
+  logo_url: { type: DataTypes.STRING(255), allowNull: true },
+  banner_url: { type: DataTypes.STRING(255), allowNull: true },
+
+  config: {
+    type: DataTypes.JSONB, // Stores active modules, theme, settings, etc.
+    allowNull: false,
+    defaultValue: {}
   },
-  facebook_handle: {
-    type: DataTypes.STRING(100),
-    allowNull: true
-  },
-  description: {
-    type: DataTypes.TEXT,
-    allowNull: true
+  status: {
+    type: DataTypes.ENUM('active', 'inactive'),
+    allowNull: false,
+    defaultValue: 'active'
   }
 }, {
   tableName: 'stores',
   timestamps: true,
   createdAt: 'created_at',
-  updatedAt: false,
-  hooks: {
-    beforeCreate: (store) => { // O hook beforeCreate garante que toda nova loja terá um id_code
-      // Normalizar email
-      if (store.email && typeof store.email === 'string') {
-        store.email = store.email.trim().toLowerCase();
-      }
-      store.id_code = uuidv4();
-    }
-  }
-});
-
-// Suporte a operações em lote
-Store.addHook('beforeBulkCreate', (instances) => {
-  if (Array.isArray(instances)) {
-    for (const inst of instances) {
-      if (inst.email && typeof inst.email === 'string') {
-        inst.email = inst.email.trim().toLowerCase();
-      }
-    }
-  }
-});
-
-Store.addHook('beforeBulkUpdate', (options) => {
-  if (options && options.attributes && typeof options.attributes.email === 'string') {
-    options.attributes.email = options.attributes.email.trim().toLowerCase();
-  }
+  updatedAt: 'updated_at'
 });
 
 module.exports = Store;

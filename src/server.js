@@ -52,6 +52,7 @@ const finTagRoutes = require('./routes/finTags');
 const sysModuleRoutes = require('./routes/sysModules');
 const eventJamMusicSuggestionRoutes = require('./routes/eventJamMusicSuggestions');
 const musicCatalogRoutes = require('./routes/musicCatalog');
+const organizationRoutes = require('./routes/organizations');
 
 // Import middleware
 const errorHandler = require('./middlewares/errorHandler');
@@ -183,6 +184,7 @@ app.use('/api/v1/sys-modules', sysModuleRoutes);
 app.use('/api/v1/event-jam-music-suggestions', eventJamMusicSuggestionRoutes);
 app.use('/api/v1/music-suggestions', eventJamMusicSuggestionRoutes); // Alias for frontend compatibility
 app.use('/api/v1/music-catalog', musicCatalogRoutes);
+app.use('/api/v1/organizations', organizationRoutes);
 
 // Upload routes
 app.use('/api/v1/upload', uploadRouter);
