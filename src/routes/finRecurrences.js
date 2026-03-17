@@ -1,6 +1,7 @@
 const express = require('express');
 const { body, query, validationResult } = require('express-validator');
 const { authenticateToken, requireRole, requireModule } = require('../middlewares/auth');
+const { requireStoreContext, requireStoreAccess } = require('../middlewares/storeContext');
 const { FinRecurrence, FinCategory, FinCostCenter, Party, User, Store } = require('../models');
 const { Op } = require('sequelize');
 const { generatePendingTransactions } = require('../services/recurrenceService');
@@ -39,8 +40,9 @@ router.post(
   '/',
   authenticateToken,
   requireModule('financial'),
+  requireStoreContext({ allowMissingForRoles: [] }),
+  requireStoreAccess,
   [
-    body('store_id').notEmpty().withMessage('Store ID is required'),
     body('type').isIn(VALID_TYPES).withMessage(`Invalid type. Allowed: ${VALID_TYPES.join(', ')}`),
     body('description').notEmpty().withMessage('Description is required'),
     body('amount').isFloat({ min: 0.01 }).withMessage('Amount must be greater than 0'),
@@ -59,7 +61,6 @@ router.post(
 
     try {
       const {
-        store_id,
         type,
         description,
         amount,
@@ -89,7 +90,7 @@ router.post(
       // For now, let's set next_due_date = start_date as a default initial value if it matches requirements.
       
       const recurrence = await FinRecurrence.create({
-        store_id,
+        store_id: req.storeId,
         type,
         description,
         amount,
@@ -117,8 +118,10 @@ router.post(
 router.get(
   '/',
   authenticateToken,
+  requireModule('financial'),
+  requireStoreContext({ allowMissingForRoles: [] }),
+  requireStoreAccess,
   [
-    query('store_id').notEmpty().withMessage('Store ID is required'),
     query('status').optional().isIn(VALID_STATUS),
     query('type').optional().isIn(VALID_TYPES),
     query('page').optional().isInt({ min: 1 }),
@@ -131,10 +134,10 @@ router.get(
     }
 
     try {
-      const { store_id, status, type, page = 1, limit = 20, search } = req.query;
+      const { status, type, page = 1, limit = 20, search } = req.query;
       const offset = (page - 1) * limit;
 
-      const where = { store_id };
+      const where = { store_id: req.storeId };
       if (status) where.status = status;
       if (type) where.type = type;
       if (search) {
@@ -170,10 +173,10 @@ router.get(
 );
 
 // === GET Recurrence by ID ===
-router.get('/:id', authenticateToken, async (req, res) => {
+router.get('/:id', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
     const recurrence = await FinRecurrence.findOne({
-      where: { id_code: req.params.id },
+      where: { id_code: req.params.id, store_id: req.storeId },
       include: [
         { model: FinCategory, as: 'finCategory' },
         { model: FinCostCenter, as: 'finCostCenter' },
@@ -199,6 +202,9 @@ router.get('/:id', authenticateToken, async (req, res) => {
 router.patch(
   '/:id',
   authenticateToken,
+  requireModule('financial'),
+  requireStoreContext({ allowMissingForRoles: [] }),
+  requireStoreAccess,
   [
     body('amount').optional().isFloat({ min: 0.01 }),
     body('day_of_month').optional().isInt({ min: 1, max: 31 }),
@@ -212,7 +218,7 @@ router.patch(
 
     try {
       const recurrence = await FinRecurrence.findOne({
-        where: { id_code: req.params.id }
+        where: { id_code: req.params.id, store_id: req.storeId }
       });
 
       if (!recurrence) {
@@ -247,10 +253,10 @@ router.patch(
 );
 
 // === DELETE Recurrence ===
-router.delete('/:id', authenticateToken, async (req, res) => {
+router.delete('/:id', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
     const recurrence = await FinRecurrence.findOne({
-      where: { id_code: req.params.id }
+      where: { id_code: req.params.id, store_id: req.storeId }
     });
 
     if (!recurrence) {

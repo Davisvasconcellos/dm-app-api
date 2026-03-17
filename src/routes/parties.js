@@ -1,16 +1,16 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { authenticateToken, requireModule } = require('../middlewares/auth');
+const { requireStoreContext, requireStoreAccess } = require('../middlewares/storeContext');
 const { Party, FinancialTransaction, sequelize } = require('../models');
 const { Op } = require('sequelize');
 
 const router = express.Router();
 
 // GET /api/v1/financial/parties
-router.get('/', authenticateToken, requireModule('financial'), async (req, res) => {
+router.get('/', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
     const { 
-      store_id, 
       type, // customer, supplier, employee, salesperson
       search,
       page = 1, 
@@ -19,9 +19,7 @@ router.get('/', authenticateToken, requireModule('financial'), async (req, res) 
 
     const where = {};
     
-    if (store_id) {
-      where.store_id = store_id;
-    }
+    where.store_id = req.storeId;
 
     if (type) {
       if (type === 'customer') where.is_customer = true;
@@ -73,10 +71,10 @@ router.get('/', authenticateToken, requireModule('financial'), async (req, res) 
 });
 
 // GET /api/v1/financial/parties/:id_code
-router.get('/:id_code', authenticateToken, requireModule('financial'), async (req, res) => {
+router.get('/:id_code', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
     const { id_code } = req.params;
-    const party = await Party.findOne({ where: { id_code } });
+    const party = await Party.findOne({ where: { id_code, store_id: req.storeId } });
 
     if (!party) {
       return res.status(404).json({ error: 'Parceiro não encontrado' });
@@ -93,8 +91,9 @@ router.get('/:id_code', authenticateToken, requireModule('financial'), async (re
 router.post('/', [
   authenticateToken,
   requireModule('financial'),
+  requireStoreContext({ allowMissingForRoles: [] }),
+  requireStoreAccess,
   body('name').notEmpty().withMessage('Nome é obrigatório'),
-  body('store_id').notEmpty().withMessage('ID da loja é obrigatório'),
   body('type').optional().isArray().withMessage('Type deve ser um array de roles [customer, supplier, etc] ou use flags individuais')
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -108,7 +107,7 @@ router.post('/', [
       is_customer, is_supplier, is_employee, is_salesperson,
       zip_code, address_street, address_number, address_complement,
       address_neighborhood, address_city, address_state,
-      notes, store_id
+      notes
     } = req.body;
 
     // Validate that at least one role is selected? Not strictly necessary but good practice.
@@ -126,7 +125,7 @@ router.post('/', [
       ...flags,
       zip_code, address_street, address_number, address_complement,
       address_neighborhood, address_city, address_state,
-      notes, store_id,
+      notes, store_id: req.storeId,
       created_by: req.user.userId
     });
 
@@ -138,10 +137,10 @@ router.post('/', [
 });
 
 // PUT /api/v1/financial/parties/:id_code
-router.put('/:id_code', authenticateToken, async (req, res) => {
+router.put('/:id_code', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
     const { id_code } = req.params;
-    const party = await Party.findOne({ where: { id_code } });
+    const party = await Party.findOne({ where: { id_code, store_id: req.storeId } });
 
     if (!party) {
       return res.status(404).json({ error: 'Parceiro não encontrado' });
@@ -185,10 +184,10 @@ router.put('/:id_code', authenticateToken, async (req, res) => {
 });
 
 // DELETE /api/v1/financial/parties/:id_code
-router.delete('/:id_code', authenticateToken, async (req, res) => {
+router.delete('/:id_code', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
     const { id_code } = req.params;
-    const party = await Party.findOne({ where: { id_code } });
+    const party = await Party.findOne({ where: { id_code, store_id: req.storeId } });
 
     if (!party) {
       return res.status(404).json({ error: 'Parceiro não encontrado' });

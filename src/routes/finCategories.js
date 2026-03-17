@@ -1,18 +1,19 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { authenticateToken, requireModule } = require('../middlewares/auth');
+const { requireStoreContext, requireStoreAccess } = require('../middlewares/storeContext');
 const { FinCategory } = require('../models');
 const { Op } = require('sequelize');
 
 const router = express.Router();
 
 // GET /api/v1/financial/categories
-router.get('/', authenticateToken, requireModule('financial'), async (req, res) => {
+router.get('/', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
-    const { store_id, type, status } = req.query;
+    const { type, status } = req.query;
     const where = {};
     
-    if (store_id) where.store_id = store_id;
+    where.store_id = req.storeId;
     if (type) where.type = type;
     if (status) where.status = status;
     else where.status = 'active'; // Default active
@@ -40,8 +41,9 @@ router.get('/', authenticateToken, requireModule('financial'), async (req, res) 
 router.post('/', [
   authenticateToken,
   requireModule('financial'),
+  requireStoreContext({ allowMissingForRoles: [] }),
+  requireStoreAccess,
   body('name').notEmpty().withMessage('Nome é obrigatório'),
-  body('store_id').notEmpty().withMessage('ID da loja é obrigatório'),
   body('type').isIn(['payable', 'receivable']).withMessage('Tipo inválido')
 ], async (req, res) => {
   const errors = validationResult(req);
@@ -50,11 +52,11 @@ router.post('/', [
   }
 
   try {
-    const { name, store_id, type, color, icon } = req.body;
+    const { name, type, color, icon } = req.body;
 
     const category = await FinCategory.create({
       name,
-      store_id,
+      store_id: req.storeId,
       type,
       color,
       icon
@@ -71,10 +73,10 @@ router.post('/', [
 });
 
 // PUT /api/v1/financial/categories/:id_code
-router.put('/:id_code', authenticateToken, async (req, res) => {
+router.put('/:id_code', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
     const { id_code } = req.params;
-    const category = await FinCategory.findOne({ where: { id_code } });
+    const category = await FinCategory.findOne({ where: { id_code, store_id: req.storeId } });
 
     if (!category) {
       return res.status(404).json({ error: 'Categoria não encontrada' });
@@ -100,10 +102,10 @@ router.put('/:id_code', authenticateToken, async (req, res) => {
 });
 
 // DELETE /api/v1/financial/categories/:id_code
-router.delete('/:id_code', authenticateToken, async (req, res) => {
+router.delete('/:id_code', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
     const { id_code } = req.params;
-    const category = await FinCategory.findOne({ where: { id_code } });
+    const category = await FinCategory.findOne({ where: { id_code, store_id: req.storeId } });
 
     if (!category) {
       return res.status(404).json({ error: 'Categoria não encontrada' });

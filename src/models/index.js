@@ -227,7 +227,7 @@ FinTag.belongsTo(Store, { foreignKey: 'store_id', targetKey: 'id_code', as: 'sto
 Store.hasMany(FinTag, { foreignKey: 'store_id', sourceKey: 'id_code', as: 'finTags' });
 
 FinancialTransaction.belongsToMany(FinTag, {
-  through: 'fin_transaction_tags',
+  through: 'financial_transaction_tags',
   foreignKey: 'transaction_id',
   otherKey: 'tag_id',
   sourceKey: 'id_code',
@@ -235,7 +235,7 @@ FinancialTransaction.belongsToMany(FinTag, {
   as: 'tags'
 });
 FinTag.belongsToMany(FinancialTransaction, {
-  through: 'fin_transaction_tags',
+  through: 'financial_transaction_tags',
   foreignKey: 'tag_id',
   otherKey: 'transaction_id',
   sourceKey: 'id_code',

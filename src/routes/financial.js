@@ -1,6 +1,7 @@
 const express = require('express');
 const { body, query, validationResult } = require('express-validator');
 const { authenticateToken, requireRole, requireModule } = require('../middlewares/auth');
+const { requireStoreContext, requireStoreAccess } = require('../middlewares/storeContext');
 const { FinancialTransaction, User, FinTag, FinCategory, FinCostCenter, Party, sequelize } = require('../models');
 const { Op, Sequelize } = require('sequelize');
 const { URL } = require('url');
@@ -134,6 +135,8 @@ router.get(
   authenticateToken,
   requireModule('financial'),
   requireRole('admin', 'manager', 'master'),
+  requireStoreContext({ allowMissingForRoles: [] }),
+  requireStoreAccess,
   [
     query('page').optional().isInt({ min: 1 }).toInt(),
     query('limit').optional().isInt({ min: 1, max: 2000 }).toInt(),
@@ -170,6 +173,8 @@ router.get(
         tags
       } = req.query;
 
+      const storeId = req.storeId;
+
       // Define limite dinâmico baseado no plano do usuário
       // Assumindo que planId = 1 é Free, e planId > 1 é Premium
       // Se não houver plano (null), também aplica restrição free
@@ -187,7 +192,7 @@ router.get(
 
       if (type) where.type = type;
       if (status) where.status = status;
-      if (store_id) where.store_id = store_id;
+      where.store_id = storeId;
       if (category_id) where.category_id = category_id;
       if (cost_center_id) where.cost_center_id = cost_center_id;
       if (party_id) where.party_id = party_id;
@@ -254,7 +259,7 @@ router.get(
       // This provides a global store view as requested
       const kpiWhere = {};
       if (kpi_linked === false) {
-        if (store_id) kpiWhere.store_id = store_id;
+        kpiWhere.store_id = storeId;
         kpiWhere.is_deleted = false;
       } else {
         Object.assign(kpiWhere, where);
@@ -417,6 +422,8 @@ router.post(
   authenticateToken,
   requireModule('financial'),
   requireRole('admin', 'manager', 'master'),
+  requireStoreContext({ allowMissingForRoles: [] }),
+  requireStoreAccess,
   [
     body('type')
       .isIn(VALID_TYPES),
@@ -501,7 +508,6 @@ router.post(
         payment_method,
         bank_account_id,
         attachment_url,
-        store_id,
         approved_by,
         tags
       } = req.body;
@@ -599,7 +605,7 @@ router.post(
         payment_method: status === 'paid' ? payment_method : null,
         bank_account_id: status === 'paid' ? bank_account_id || null : null,
         attachment_url: serializeAttachmentsToStorage(attachments),
-        store_id: store_id || null,
+        store_id: req.storeId,
         approved_by: approved_by || null,
         created_by_user_id: user.id,
         updated_by_user_id: null,
@@ -722,6 +728,8 @@ router.patch(
   authenticateToken,
   requireModule('financial'),
   requireRole('admin', 'manager', 'master'),
+  requireStoreContext({ allowMissingForRoles: [] }),
+  requireStoreAccess,
   [
     body('type')
       .optional()
@@ -796,7 +804,7 @@ router.patch(
 
     try {
       const transaction = await FinancialTransaction.findOne({
-        where: { id_code: req.params.id_code }
+        where: { id_code: req.params.id_code, store_id: req.storeId }
       });
 
       if (!transaction) {
@@ -870,9 +878,7 @@ router.patch(
         ? parseAttachmentsFromRequestBody(req.body, existing.attachment_url)
         : parseStoredAttachments(existing.attachment_url);
       const storedAttachmentValue = serializeAttachmentsToStorage(attachmentsForStorage);
-      const store_id = Object.prototype.hasOwnProperty.call(req.body, 'store_id')
-        ? req.body.store_id
-        : existing.store_id;
+      const store_id = existing.store_id;
       const approved_by = Object.prototype.hasOwnProperty.call(req.body, 'approved_by')
         ? req.body.approved_by
         : existing.approved_by;

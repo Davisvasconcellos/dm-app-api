@@ -104,7 +104,7 @@ const Party = sequelize.define('Party', {
     allowNull: true
   }
 }, {
-  tableName: 'fin_parties',
+  tableName: 'financial_parties',
   timestamps: true,
   createdAt: 'created_at',
   updatedAt: 'updated_at',

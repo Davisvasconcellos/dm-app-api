@@ -86,7 +86,7 @@ const FinRecurrence = sequelize.define('FinRecurrence', {
     }
   }
 }, {
-  tableName: 'fin_recurrences',
+  tableName: 'financial_recurrences',
   timestamps: true,
   createdAt: 'created_at',
   updatedAt: 'updated_at',

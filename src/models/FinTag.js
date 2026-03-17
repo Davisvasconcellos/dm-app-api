@@ -31,7 +31,7 @@ const FinTag = sequelize.define('FinTag', {
     defaultValue: 'active'
   }
 }, {
-  tableName: 'fin_tags',
+  tableName: 'financial_tags',
   timestamps: true,
   createdAt: 'created_at',
   updatedAt: 'updated_at',

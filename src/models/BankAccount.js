@@ -74,7 +74,7 @@ const BankAccount = sequelize.define('BankAccount', {
     allowNull: true
   }
 }, {
-  tableName: 'fin_bank_accounts',
+  tableName: 'financial_bank_accounts',
   timestamps: true,
   createdAt: 'created_at',
   updatedAt: 'updated_at',

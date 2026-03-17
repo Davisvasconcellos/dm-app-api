@@ -1,18 +1,19 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { authenticateToken, requireModule } = require('../middlewares/auth');
+const { requireStoreContext, requireStoreAccess } = require('../middlewares/storeContext');
 const { FinTag } = require('../models');
 const { Op } = require('sequelize');
 
 const router = express.Router();
 
 // GET /api/v1/financial/tags
-router.get('/', authenticateToken, requireModule('financial'), async (req, res) => {
+router.get('/', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
-    const { store_id, status } = req.query;
+    const { status } = req.query;
     const where = {};
     
-    if (store_id) where.store_id = store_id;
+    where.store_id = req.storeId;
     if (status) where.status = status;
     else where.status = 'active';
 
@@ -39,8 +40,9 @@ router.get('/', authenticateToken, requireModule('financial'), async (req, res) 
 router.post('/', [
   authenticateToken,
   requireModule('financial'),
+  requireStoreContext({ allowMissingForRoles: [] }),
+  requireStoreAccess,
   body('name').notEmpty().withMessage('Nome é obrigatório'),
-  body('store_id').notEmpty().withMessage('ID da loja é obrigatório')
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -48,11 +50,11 @@ router.post('/', [
   }
 
   try {
-    const { name, store_id, color } = req.body;
+    const { name, color } = req.body;
 
     const tag = await FinTag.create({
       name,
-      store_id,
+      store_id: req.storeId,
       color
     });
 
@@ -67,10 +69,10 @@ router.post('/', [
 });
 
 // PUT /api/v1/financial/tags/:id_code
-router.put('/:id_code', authenticateToken, async (req, res) => {
+router.put('/:id_code', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
     const { id_code } = req.params;
-    const tag = await FinTag.findOne({ where: { id_code } });
+    const tag = await FinTag.findOne({ where: { id_code, store_id: req.storeId } });
 
     if (!tag) {
       return res.status(404).json({ error: 'Tag não encontrada' });
@@ -94,10 +96,10 @@ router.put('/:id_code', authenticateToken, async (req, res) => {
 });
 
 // DELETE /api/v1/financial/tags/:id_code
-router.delete('/:id_code', authenticateToken, async (req, res) => {
+router.delete('/:id_code', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
     const { id_code } = req.params;
-    const tag = await FinTag.findOne({ where: { id_code } });
+    const tag = await FinTag.findOne({ where: { id_code, store_id: req.storeId } });
 
     if (!tag) {
       return res.status(404).json({ error: 'Tag não encontrada' });

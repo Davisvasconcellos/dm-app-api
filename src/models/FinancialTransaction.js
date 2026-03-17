@@ -127,7 +127,7 @@ const FinancialTransaction = sequelize.define('FinancialTransaction', {
     defaultValue: false
   }
 }, {
-  tableName: 'fin_transactions',
+  tableName: 'financial_transactions',
   timestamps: true,
   createdAt: 'created_at',
   updatedAt: 'updated_at',

@@ -2,6 +2,7 @@ const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { Op } = require('sequelize');
 const { authenticateToken, requireModule } = require('../middlewares/auth');
+const { requireStoreContext, requireStoreAccess } = require('../middlewares/storeContext');
 const { BankAccount, FinancialTransaction, sequelize, FinCategory, FinCostCenter, Party, FinTag } = require('../models');
 
 const router = express.Router();
@@ -31,14 +32,9 @@ const VALID_PAYMENT_METHODS = ['cash', 'pix', 'credit_card', 'debit_card', 'bank
  */
 
 // GET /api/v1/financial/bank-accounts
-router.get('/', authenticateToken, requireModule('financial'), async (req, res) => {
+router.get('/', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
-    const { store_id } = req.query;
-    const where = {};
-    
-    if (store_id) {
-      where.store_id = store_id;
-    }
+    const where = { store_id: req.storeId };
 
     const accounts = await BankAccount.findAll({
       where,
@@ -115,10 +111,10 @@ router.get('/', authenticateToken, requireModule('financial'), async (req, res) 
 });
 
 // GET /api/v1/financial/bank-accounts/:id_code
-router.get('/:id_code', authenticateToken, async (req, res) => {
+router.get('/:id_code', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
     const { id_code } = req.params;
-    const account = await BankAccount.findOne({ where: { id_code } });
+    const account = await BankAccount.findOne({ where: { id_code, store_id: req.storeId } });
 
     if (!account) {
       return res.status(404).json({ error: 'Conta bancária não encontrada' });
@@ -145,7 +141,7 @@ router.get('/:id_code', authenticateToken, async (req, res) => {
 });
 
 // GET /api/v1/financial/bank-accounts/:id_code/transactions
-router.get('/:id_code/transactions', authenticateToken, async (req, res) => {
+router.get('/:id_code/transactions', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
     const { id_code } = req.params;
     const { 
@@ -158,7 +154,7 @@ router.get('/:id_code/transactions', authenticateToken, async (req, res) => {
       cost_center_id 
     } = req.query;
 
-    const account = await BankAccount.findOne({ where: { id_code } });
+    const account = await BankAccount.findOne({ where: { id_code, store_id: req.storeId } });
 
     if (!account) {
       return res.status(404).json({ error: 'Conta bancária não encontrada' });
@@ -166,6 +162,7 @@ router.get('/:id_code/transactions', authenticateToken, async (req, res) => {
 
     const where = {
       bank_account_id: id_code,
+      store_id: req.storeId,
       status: 'paid',
       is_deleted: false
     };
@@ -246,6 +243,9 @@ router.get('/:id_code/transactions', authenticateToken, async (req, res) => {
 // POST /api/v1/financial/bank-accounts
 router.post('/', [
   authenticateToken,
+  requireModule('financial'),
+  requireStoreContext({ allowMissingForRoles: [] }),
+  requireStoreAccess,
   body('name').notEmpty().withMessage('Nome da conta é obrigatório'),
   body('bank_name').notEmpty().withMessage('Nome do banco é obrigatório'),
   body('agency').notEmpty().withMessage('Agência é obrigatória'),
@@ -267,8 +267,9 @@ router.post('/', [
   try {
     const { 
       name, bank_name, bank_code, agency, account_number, account_digit, 
-      type, initial_balance, store_id, is_active, is_default, allowed_payment_methods 
+      type, initial_balance, is_active, is_default, allowed_payment_methods 
     } = req.body;
+    const store_id = req.storeId;
 
     const result = await sequelize.transaction(async (t) => {
       const newAccount = await BankAccount.create({
@@ -318,6 +319,9 @@ router.post('/', [
 // PUT /api/v1/financial/bank-accounts/:id_code
 router.put('/:id_code', [
   authenticateToken,
+  requireModule('financial'),
+  requireStoreContext({ allowMissingForRoles: [] }),
+  requireStoreAccess,
   body('name').optional().notEmpty().withMessage('Nome da conta não pode ser vazio'),
   body('type').optional().isIn(['checking', 'savings', 'investment', 'payment', 'cash', 'credit_card', 'other']).withMessage('Tipo de conta inválido'),
   body('allowed_payment_methods').optional().isArray().withMessage('Métodos de pagamento permitidos deve ser uma lista')
@@ -335,7 +339,7 @@ router.put('/:id_code', [
 
   try {
     const { id_code } = req.params;
-    const account = await BankAccount.findOne({ where: { id_code } });
+    const account = await BankAccount.findOne({ where: { id_code, store_id: req.storeId } });
 
     if (!account) {
       return res.status(404).json({ error: 'Conta bancária não encontrada' });
@@ -343,7 +347,7 @@ router.put('/:id_code', [
 
     const { 
       name, bank_name, bank_code, agency, account_number, account_digit, 
-      type, initial_balance, store_id, is_active, is_default, allowed_payment_methods 
+      type, initial_balance, is_active, is_default, allowed_payment_methods 
     } = req.body;
 
     // Build update object
@@ -355,7 +359,6 @@ router.put('/:id_code', [
     if (account_number) updateData.account_number = account_number;
     if (account_digit) updateData.account_digit = account_digit;
     if (type) updateData.type = type;
-    if (store_id) updateData.store_id = store_id;
     if (is_active !== undefined) updateData.is_active = is_active;
     if (is_default !== undefined) updateData.is_default = is_default;
     if (allowed_payment_methods) updateData.allowed_payment_methods = allowed_payment_methods;
@@ -370,10 +373,10 @@ router.put('/:id_code', [
 });
 
 // DELETE /api/v1/financial/bank-accounts/:id_code
-router.delete('/:id_code', authenticateToken, async (req, res) => {
+router.delete('/:id_code', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
     const { id_code } = req.params;
-    const account = await BankAccount.findOne({ where: { id_code } });
+    const account = await BankAccount.findOne({ where: { id_code, store_id: req.storeId } });
 
     if (!account) {
       return res.status(404).json({ error: 'Conta bancária não encontrada' });

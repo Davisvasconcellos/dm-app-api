@@ -39,7 +39,7 @@ const FinCategory = sequelize.define('FinCategory', {
     defaultValue: 'active'
   }
 }, {
-  tableName: 'fin_categories',
+  tableName: 'financial_categories',
   timestamps: true,
   createdAt: 'created_at',
   updatedAt: 'updated_at',

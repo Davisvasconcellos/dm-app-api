@@ -36,7 +36,7 @@ const FinCostCenter = sequelize.define('FinCostCenter', {
     defaultValue: 'active'
   }
 }, {
-  tableName: 'fin_cost_centers',
+  tableName: 'financial_cost_centers',
   timestamps: true,
   createdAt: 'created_at',
   updatedAt: 'updated_at',

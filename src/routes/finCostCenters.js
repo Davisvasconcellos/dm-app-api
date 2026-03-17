@@ -1,18 +1,19 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { authenticateToken, requireModule } = require('../middlewares/auth');
+const { requireStoreContext, requireStoreAccess } = require('../middlewares/storeContext');
 const { FinCostCenter } = require('../models');
 const { Op } = require('sequelize');
 
 const router = express.Router();
 
 // GET /api/v1/financial/cost-centers
-router.get('/', authenticateToken, requireModule('financial'), async (req, res) => {
+router.get('/', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
-    const { store_id, status } = req.query;
+    const { status } = req.query;
     const where = {};
     
-    if (store_id) where.store_id = store_id;
+    where.store_id = req.storeId;
     if (status) where.status = status;
     else where.status = 'active';
 
@@ -39,8 +40,9 @@ router.get('/', authenticateToken, requireModule('financial'), async (req, res) 
 router.post('/', [
   authenticateToken,
   requireModule('financial'),
+  requireStoreContext({ allowMissingForRoles: [] }),
+  requireStoreAccess,
   body('name').notEmpty().withMessage('Nome é obrigatório'),
-  body('store_id').notEmpty().withMessage('ID da loja é obrigatório')
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -48,11 +50,11 @@ router.post('/', [
   }
 
   try {
-    const { name, store_id, code, description } = req.body;
+    const { name, code, description } = req.body;
 
     const costCenter = await FinCostCenter.create({
       name,
-      store_id,
+      store_id: req.storeId,
       code,
       description
     });
@@ -68,10 +70,10 @@ router.post('/', [
 });
 
 // PUT /api/v1/financial/cost-centers/:id_code
-router.put('/:id_code', authenticateToken, async (req, res) => {
+router.put('/:id_code', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
     const { id_code } = req.params;
-    const costCenter = await FinCostCenter.findOne({ where: { id_code } });
+    const costCenter = await FinCostCenter.findOne({ where: { id_code, store_id: req.storeId } });
 
     if (!costCenter) {
       return res.status(404).json({ error: 'Centro de custo não encontrado' });
@@ -96,10 +98,10 @@ router.put('/:id_code', authenticateToken, async (req, res) => {
 });
 
 // DELETE /api/v1/financial/cost-centers/:id_code
-router.delete('/:id_code', authenticateToken, async (req, res) => {
+router.delete('/:id_code', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {
     const { id_code } = req.params;
-    const costCenter = await FinCostCenter.findOne({ where: { id_code } });
+    const costCenter = await FinCostCenter.findOne({ where: { id_code, store_id: req.storeId } });
 
     if (!costCenter) {
       return res.status(404).json({ error: 'Centro de custo não encontrado' });
