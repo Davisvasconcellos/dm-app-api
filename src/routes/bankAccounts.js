@@ -18,17 +18,187 @@ const VALID_PAYMENT_METHODS = ['cash', 'pix', 'credit_card', 'debit_card', 'bank
  *       properties:
  *         id_code:
  *           type: string
+ *         store_id:
+ *           type: string
  *         name:
  *           type: string
  *         bank_name:
+ *           type: string
+ *         bank_code:
  *           type: string
  *         agency:
  *           type: string
  *         account_number:
  *           type: string
+ *         account_digit:
+ *           type: string
  *         type:
  *           type: string
- *           enum: [checking, savings, investment, payment, other]
+ *           enum: [checking, savings, investment, payment, cash, credit_card, other]
+ *         allowed_payment_methods:
+ *           type: array
+ *           items:
+ *             type: string
+ *             enum: [cash, pix, credit_card, debit_card, bank_transfer, boleto]
+ *         is_active:
+ *           type: boolean
+ *         is_default:
+ *           type: boolean
+ *         current_balance:
+ *           type: number
+ *
+ * /api/v1/financial/bank-accounts:
+ *   get:
+ *     summary: Listar contas bancárias (com saldo calculado)
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     responses:
+ *       200:
+ *         description: Lista de contas
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/BankAccount'
+ *
+ *   post:
+ *     summary: Criar conta bancária (opcional saldo inicial)
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name, bank_name, agency, account_number, type]
+ *             properties:
+ *               name:
+ *                 type: string
+ *               bank_name:
+ *                 type: string
+ *               bank_code:
+ *                 type: string
+ *               agency:
+ *                 type: string
+ *               account_number:
+ *                 type: string
+ *               account_digit:
+ *                 type: string
+ *               type:
+ *                 type: string
+ *                 enum: [checking, savings, investment, payment, cash, credit_card, other]
+ *               initial_balance:
+ *                 type: number
+ *               is_active:
+ *                 type: boolean
+ *               is_default:
+ *                 type: boolean
+ *               allowed_payment_methods:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                   enum: [cash, pix, credit_card, debit_card, bank_transfer, boleto]
+ *     responses:
+ *       201:
+ *         description: Conta criada
+ *
+ * /api/v1/financial/bank-accounts/{id_code}:
+ *   get:
+ *     summary: Buscar conta bancária por id_code
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id_code
+ *         schema:
+ *           type: string
+ *         required: true
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     responses:
+ *       200:
+ *         description: Conta
+ *
+ *   put:
+ *     summary: Atualizar conta bancária
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id_code
+ *         schema:
+ *           type: string
+ *         required: true
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     responses:
+ *       200:
+ *         description: Conta atualizada
+ *
+ *   delete:
+ *     summary: Remover conta bancária (soft delete)
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id_code
+ *         schema:
+ *           type: string
+ *         required: true
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     responses:
+ *       200:
+ *         description: Conta removida
+ *
+ * /api/v1/financial/bank-accounts/{id_code}/transactions:
+ *   get:
+ *     summary: Listar lançamentos de uma conta bancária
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id_code
+ *         schema:
+ *           type: string
+ *         required: true
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     responses:
+ *       200:
+ *         description: Lista de transações
  */
 
 // GET /api/v1/financial/bank-accounts

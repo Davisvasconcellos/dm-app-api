@@ -28,6 +28,10 @@ const SysModule = sequelize.define('SysModule', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  home_path: {
+    type: DataTypes.STRING(255),
+    allowNull: true
+  },
   active: {
     type: DataTypes.BOOLEAN,
     defaultValue: true

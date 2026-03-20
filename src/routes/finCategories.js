@@ -7,6 +7,136 @@ const { Op } = require('sequelize');
 
 const router = express.Router();
 
+/**
+ * @swagger
+ * components:
+ *   schemas:
+ *     FinCategory:
+ *       type: object
+ *       properties:
+ *         id_code:
+ *           type: string
+ *         store_id:
+ *           type: string
+ *         name:
+ *           type: string
+ *         type:
+ *           type: string
+ *           enum: [payable, receivable]
+ *         color:
+ *           type: string
+ *         icon:
+ *           type: string
+ *         status:
+ *           type: string
+ *           enum: [active, inactive]
+ *
+ * /api/v1/financial/categories:
+ *   get:
+ *     summary: Listar categorias financeiras
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *       - in: query
+ *         name: type
+ *         schema:
+ *           type: string
+ *           enum: [payable, receivable]
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *           enum: [active, inactive]
+ *     responses:
+ *       200:
+ *         description: Lista de categorias
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/FinCategory'
+ *
+ *   post:
+ *     summary: Criar categoria financeira
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name, type]
+ *             properties:
+ *               name:
+ *                 type: string
+ *               type:
+ *                 type: string
+ *                 enum: [payable, receivable]
+ *               color:
+ *                 type: string
+ *               icon:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Categoria criada
+ *
+ * /api/v1/financial/categories/{id_code}:
+ *   put:
+ *     summary: Atualizar categoria financeira
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id_code
+ *         schema:
+ *           type: string
+ *         required: true
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     responses:
+ *       200:
+ *         description: Categoria atualizada
+ *
+ *   delete:
+ *     summary: Remover categoria financeira (soft delete)
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id_code
+ *         schema:
+ *           type: string
+ *         required: true
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     responses:
+ *       200:
+ *         description: Categoria removida
+ */
+
 // GET /api/v1/financial/categories
 router.get('/', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {

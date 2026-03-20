@@ -7,6 +7,143 @@ const { Op } = require('sequelize');
 
 const router = express.Router();
 
+/**
+ * @swagger
+ * components:
+ *   schemas:
+ *     Party:
+ *       type: object
+ *       properties:
+ *         id_code:
+ *           type: string
+ *         store_id:
+ *           type: string
+ *         name:
+ *           type: string
+ *         trade_name:
+ *           type: string
+ *         document:
+ *           type: string
+ *         email:
+ *           type: string
+ *         phone:
+ *           type: string
+ *         mobile:
+ *           type: string
+ *         is_customer:
+ *           type: boolean
+ *         is_supplier:
+ *           type: boolean
+ *         is_employee:
+ *           type: boolean
+ *         is_salesperson:
+ *           type: boolean
+ *         status:
+ *           type: string
+ *           enum: [active, inactive, blocked]
+ *
+ * /api/v1/parties:
+ *   get:
+ *     summary: Listar parceiros (clientes/fornecedores/etc)
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *       - in: query
+ *         name: type
+ *         schema:
+ *           type: string
+ *           enum: [customer, supplier, employee, salesperson]
+ *       - in: query
+ *         name: search
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *     responses:
+ *       200:
+ *         description: Lista paginada de parceiros
+ *
+ *   post:
+ *     summary: Criar parceiro
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name:
+ *                 type: string
+ *               trade_name:
+ *                 type: string
+ *               document:
+ *                 type: string
+ *               email:
+ *                 type: string
+ *               phone:
+ *                 type: string
+ *               mobile:
+ *                 type: string
+ *               is_customer:
+ *                 type: boolean
+ *               is_supplier:
+ *                 type: boolean
+ *               is_employee:
+ *                 type: boolean
+ *               is_salesperson:
+ *                 type: boolean
+ *     responses:
+ *       201:
+ *         description: Parceiro criado
+ *
+ * /api/v1/parties/{id_code}:
+ *   get:
+ *     summary: Buscar parceiro por id_code
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id_code
+ *         schema:
+ *           type: string
+ *         required: true
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     responses:
+ *       200:
+ *         description: Parceiro
+ *       404:
+ *         description: Não encontrado
+ */
+
 // GET /api/v1/financial/parties
 router.get('/', authenticateToken, requireModule('financial'), requireStoreContext({ allowMissingForRoles: [] }), requireStoreAccess, async (req, res) => {
   try {

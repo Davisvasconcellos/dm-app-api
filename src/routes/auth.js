@@ -76,7 +76,7 @@ router.post('/login', [
         {
           model: require('../models').SysModule,
           as: 'modules',
-          attributes: ['id', 'id_code', 'name', 'slug', 'active'],
+          attributes: ['id', 'id_code', 'name', 'slug', 'home_path', 'active'],
           through: { attributes: [] }
         },
         {
@@ -412,7 +412,7 @@ router.get('/me', authenticateToken, async (req, res) => {
         {
           model: require('../models').SysModule,
           as: 'modules',
-          attributes: ['id', 'id_code', 'name', 'slug', 'active'],
+          attributes: ['id', 'id_code', 'name', 'slug', 'home_path', 'active'],
           through: { attributes: [] }
         },
         {

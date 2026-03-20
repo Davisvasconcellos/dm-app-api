@@ -12,6 +12,152 @@ const VALID_TYPES = ['PAYABLE', 'RECEIVABLE', 'TRANSFER'];
 const VALID_FREQUENCIES = ['weekly', 'monthly', 'yearly'];
 const VALID_STATUS = ['active', 'paused', 'finished'];
 
+/**
+ * @swagger
+ * components:
+ *   schemas:
+ *     FinRecurrence:
+ *       type: object
+ *       properties:
+ *         id_code:
+ *           type: string
+ *         store_id:
+ *           type: string
+ *         type:
+ *           type: string
+ *           enum: [PAYABLE, RECEIVABLE, TRANSFER]
+ *         description:
+ *           type: string
+ *         amount:
+ *           type: number
+ *         frequency:
+ *           type: string
+ *           enum: [weekly, monthly, yearly]
+ *         start_date:
+ *           type: string
+ *           format: date
+ *         end_date:
+ *           type: string
+ *           format: date
+ *         day_of_month:
+ *           type: integer
+ *         status:
+ *           type: string
+ *           enum: [active, paused, finished]
+ *
+ * /api/v1/financial/recurrences:
+ *   get:
+ *     summary: Listar recorrências
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     responses:
+ *       200:
+ *         description: Lista de recorrências
+ *
+ *   post:
+ *     summary: Criar recorrência
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     responses:
+ *       201:
+ *         description: Recorrência criada
+ *
+ * /api/v1/financial/recurrences/{id}:
+ *   get:
+ *     summary: Buscar recorrência por id_code
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: string
+ *         required: true
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     responses:
+ *       200:
+ *         description: Recorrência
+ *
+ *   patch:
+ *     summary: Atualizar recorrência
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: string
+ *         required: true
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     responses:
+ *       200:
+ *         description: Recorrência atualizada
+ *
+ *   delete:
+ *     summary: Remover recorrência
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         schema:
+ *           type: string
+ *         required: true
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     responses:
+ *       200:
+ *         description: Recorrência removida
+ *
+ * /api/v1/financial/recurrences/generate:
+ *   post:
+ *     summary: Gerar transações pendentes a partir das recorrências
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               target_date:
+ *                 type: string
+ *                 format: date
+ *     responses:
+ *       200:
+ *         description: Geração executada
+ */
+
 // === GENERATE Transactions from Recurrences ===
 router.post(
   '/generate',

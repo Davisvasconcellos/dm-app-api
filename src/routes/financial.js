@@ -13,6 +13,137 @@ const VALID_STATUS = ['pending', 'approved', 'scheduled', 'paid', 'overdue', 'ca
 const VALID_PAYMENT_METHODS = ['cash', 'pix', 'credit_card', 'debit_card', 'bank_transfer', 'boleto'];
 const BANK_MOVEMENT_METHODS = ['pix', 'bank_transfer', 'boleto'];
 
+/**
+ * @swagger
+ * tags:
+ *   - name: Financial
+ *     description: Rotas financeiras (transações e satélites)
+ *
+ * /api/v1/financial/transactions:
+ *   get:
+ *     summary: Listar transações (com paginação e KPI opcional)
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *       - in: query
+ *         name: kpi_linked
+ *         schema:
+ *           type: boolean
+ *           default: true
+ *     responses:
+ *       200:
+ *         description: Lista de transações
+ *       401:
+ *         description: Não autenticado
+ *       403:
+ *         description: Sem permissão
+ *
+ *   post:
+ *     summary: Criar transação
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [type, description, amount, due_date, status]
+ *             properties:
+ *               type:
+ *                 type: string
+ *                 enum: [PAYABLE, RECEIVABLE, TRANSFER, ADJUSTMENT]
+ *               description:
+ *                 type: string
+ *               amount:
+ *                 type: number
+ *               due_date:
+ *                 type: string
+ *                 format: date
+ *               status:
+ *                 type: string
+ *                 enum: [pending, approved, scheduled, paid, overdue, canceled, provisioned]
+ *               is_paid:
+ *                 type: boolean
+ *               paid_at:
+ *                 type: string
+ *                 format: date-time
+ *               payment_method:
+ *                 type: string
+ *                 enum: [cash, pix, credit_card, debit_card, bank_transfer, boleto]
+ *               bank_account_id:
+ *                 type: string
+ *               party_id:
+ *                 type: string
+ *               category_id:
+ *                 type: string
+ *               cost_center_id:
+ *                 type: string
+ *               tags:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *     responses:
+ *       201:
+ *         description: Transação criada
+ *       400:
+ *         description: Erro de validação
+ *
+ * /api/v1/financial/transactions/{id_code}:
+ *   patch:
+ *     summary: Atualizar transação
+ *     tags: [Financial]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id_code
+ *         schema:
+ *           type: string
+ *         required: true
+ *       - in: query
+ *         name: store_id
+ *         schema:
+ *           type: string
+ *         required: true
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *     responses:
+ *       200:
+ *         description: Transação atualizada
+ *       400:
+ *         description: Erro de validação
+ *       404:
+ *         description: Não encontrado
+ */
+
 const parseStoredAttachments = (raw) => {
   if (!raw) return [];
   let text = raw;

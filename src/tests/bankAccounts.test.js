@@ -14,6 +14,18 @@ jest.mock('../middlewares/auth', () => ({
   }
 }));
 
+jest.mock('../middlewares/storeContext', () => ({
+  requireStoreContext: () => (req, res, next) => {
+    req.storeId = String(req.query.store_id || req.body.store_id || 'store-uuid-1');
+    next();
+  },
+  requireStoreAccess: (req, res, next) => {
+    req.storeDbId = 10;
+    req.store = { id: 10, id_code: req.storeId, name: 'Loja Teste', owner_id: 1 };
+    next();
+  }
+}));
+
 // MOCK MODELS
 jest.mock('../models', () => {
   const Sequelize = require('sequelize');

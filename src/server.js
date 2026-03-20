@@ -53,6 +53,8 @@ const sysModuleRoutes = require('./routes/sysModules');
 const eventJamMusicSuggestionRoutes = require('./routes/eventJamMusicSuggestions');
 const musicCatalogRoutes = require('./routes/musicCatalog');
 const organizationRoutes = require('./routes/organizations');
+const storeInvitesRoutes = require('./routes/storeInvites');
+const storeInvitesPublicRoutes = require('./routes/storeInvitesPublic');
 
 // Import middleware
 const errorHandler = require('./middlewares/errorHandler');
@@ -61,7 +63,10 @@ const errorHandler = require('./middlewares/errorHandler');
 const { sequelize, testConnection } = require('./config/database');
 
 // Import Firebase (trigger init log)
-require('./config/firebaseAdmin');
+const isTestEnv = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
+if (!isTestEnv) {
+  require('./config/firebaseAdmin');
+}
 
 const app = express();
 const debugRouter = require('./routes/debug');
@@ -172,6 +177,7 @@ app.use('/api/v1/event-jams', eventJamsRoutes); // Alias
 app.use('/api/v1/events', eventJamsRoutes); // Mount jams under events too if needed, but separate is safer
 app.use('/api/events', eventJamsRoutes); // Alias for legacy/frontend compatibility
 app.use('/api/public/v1/events', eventOpenRoutes);
+app.use('/api/public/v1/store-invites', storeInvitesPublicRoutes);
 app.use('/api/v1/files', filesRoutes);
 app.use('/api/v1/financial', financialRoutes);
 app.use('/api/v1/financial/recurrences', finRecurrenceRoutes);
@@ -187,36 +193,43 @@ app.use('/api/v1/event-jam-music-suggestions', eventJamMusicSuggestionRoutes);
 app.use('/api/v1/music-suggestions', eventJamMusicSuggestionRoutes); // Alias for frontend compatibility
 app.use('/api/v1/music-catalog', musicCatalogRoutes);
 app.use('/api/v1/organizations', organizationRoutes);
+app.use('/api/v1/store-invites', storeInvitesRoutes);
 
 // Upload routes
 app.use('/api/v1/upload', uploadRouter);
+app.use('/api/v1/uploads', uploadRouter);
+app.use('/api/uploads', uploadRouter);
 
 // Error handler middleware
 app.use(errorHandler);
 
 // Cron Jobs
 // Gerar transações pendentes diariamente às 00:01
-cron.schedule('1 0 * * *', async () => {
-  console.log('Running daily recurrence check...');
-  try {
-    await generatePendingTransactions();
-    console.log('Daily recurrence check completed.');
-  } catch (error) {
-    console.error('Daily recurrence check failed:', error);
-  }
-});
+if (!isTestEnv) {
+  cron.schedule('1 0 * * *', async () => {
+    console.log('Running daily recurrence check...');
+    try {
+      await generatePendingTransactions();
+      console.log('Daily recurrence check completed.');
+    } catch (error) {
+      console.error('Daily recurrence check failed:', error);
+    }
+  });
+}
 
 // Start server
-const server = app.listen(PORT, async () => {
-  console.log(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
-  try {
-    await testConnection(); // Usa a função de teste que tem logs coloridos
-    console.log('Database connected!');
-    // await sequelize.sync(); // Disable sync in production/dev usually
-  } catch (error) {
-    console.error('Unable to connect to the database:', error);
-  }
-});
+if (!isTestEnv) {
+  const server = app.listen(PORT, async () => {
+    console.log(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
+    try {
+      await testConnection(); // Usa a função de teste que tem logs coloridos
+      console.log('Database connected!');
+      // await sequelize.sync(); // Disable sync in production/dev usually
+    } catch (error) {
+      console.error('Unable to connect to the database:', error);
+    }
+  });
+}
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (err, promise) => {

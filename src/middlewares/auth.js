@@ -49,6 +49,32 @@ const authenticateToken = async (req, res, next) => {
 
 
     if (cachedUser && (Date.now() - cachedUser.timestamp < USER_CACHE_TTL_MS)) {
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+        const user = await User.findByPk(decoded.userId, {
+          attributes: ['id', 'role', 'email', 'plan_id']
+        });
+
+        if (!user) {
+          userCache.delete(decoded.userId);
+          return res.status(401).json({ message: 'Usuário não encontrado' });
+        }
+
+        const userData = {
+          userId: user.id,
+          email: user.email,
+          role: user.role,
+          planId: user.plan_id
+        };
+
+        userCache.set(decoded.userId, {
+          data: userData,
+          timestamp: Date.now()
+        });
+
+        req.user = userData;
+        return next();
+      }
+
       req.user = cachedUser.data;
       return next();
     }

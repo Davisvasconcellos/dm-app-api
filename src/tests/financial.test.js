@@ -16,6 +16,18 @@ jest.mock('../middlewares/auth', () => ({
   }
 }));
 
+jest.mock('../middlewares/storeContext', () => ({
+  requireStoreContext: () => (req, res, next) => {
+    req.storeId = String(req.query.store_id || req.body.store_id || 'store-uuid-1');
+    next();
+  },
+  requireStoreAccess: (req, res, next) => {
+    req.storeDbId = 10;
+    req.store = { id: 10, id_code: req.storeId, name: 'Loja Teste', owner_id: 1 };
+    next();
+  }
+}));
+
 // MOCK MODELS
 jest.mock('../models', () => {
   const Sequelize = require('sequelize');
@@ -24,6 +36,7 @@ jest.mock('../models', () => {
       define: jest.fn(),
       authenticate: jest.fn(),
       close: jest.fn(),
+      transaction: jest.fn(() => Promise.resolve({ commit: jest.fn(), rollback: jest.fn() }))
     },
     User: {
       findByPk: jest.fn().mockResolvedValue({ 
@@ -34,13 +47,17 @@ jest.mock('../models', () => {
     },
     FinancialTransaction: {
       create: jest.fn().mockImplementation((payload) => {
-        return Promise.resolve({
+        const instance = {
           ...payload,
           id_code: 'txn-uuid-123',
           created_at: new Date(),
           updated_at: new Date(),
+          attachment_url: null,
+          setTags: jest.fn().mockResolvedValue(true),
+          reload: jest.fn().mockResolvedValue(true),
           toJSON: function() { return this; }
-        });
+        };
+        return Promise.resolve(instance);
       }),
       findAndCountAll: jest.fn().mockResolvedValue({
         count: 1,

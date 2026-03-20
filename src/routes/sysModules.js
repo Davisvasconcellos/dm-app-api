@@ -9,7 +9,7 @@ router.get('/', authenticateToken, requireRole('admin', 'master', 'masteradmin')
   try {
     const modules = await SysModule.findAll({
       where: { active: true },
-      attributes: ['id', 'id_code', 'name', 'slug', 'description']
+      attributes: ['id', 'id_code', 'name', 'slug', 'description', 'home_path']
     });
 
     res.json({

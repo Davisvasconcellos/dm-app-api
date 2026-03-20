@@ -39,11 +39,6 @@ const requireStoreAccess = async (req, res, next) => {
       });
     }
 
-    const highPrivilegeRoles = ['admin', 'master', 'masteradmin'];
-    if (highPrivilegeRoles.includes(req.user.role)) {
-      return next();
-    }
-
     const store = await Store.findOne({ where: { id_code: req.storeId } });
     if (!store) {
       return res.status(404).json({ error: 'Not Found', message: 'Loja não encontrada' });
@@ -51,6 +46,11 @@ const requireStoreAccess = async (req, res, next) => {
 
     req.store = store;
     req.storeDbId = store.id;
+
+    const highPrivilegeRoles = ['admin', 'master', 'masteradmin'];
+    if (highPrivilegeRoles.includes(req.user.role)) {
+      return next();
+    }
 
     if (store.owner_id && String(store.owner_id) === String(req.user.userId)) {
       return next();
@@ -81,4 +81,3 @@ module.exports = {
   requireStoreContext,
   requireStoreAccess
 };
-

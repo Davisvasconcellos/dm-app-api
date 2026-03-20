@@ -170,7 +170,7 @@ router.get('/:id', authenticateToken, requireRole('admin', 'manager'), async (re
         {
           model: require('../models').SysModule,
           as: 'modules',
-          attributes: ['id', 'id_code', 'name', 'slug', 'active'],
+          attributes: ['id', 'id_code', 'name', 'slug', 'home_path', 'active'],
           through: { attributes: [] }
         }
       ],
@@ -352,7 +352,7 @@ router.put('/:id', authenticateToken, requireRole('admin', 'master', 'masteradmi
         { 
           model: require('../models').SysModule, 
           as: 'modules',
-          attributes: ['id', 'id_code', 'name', 'slug', 'active'],
+          attributes: ['id', 'id_code', 'name', 'slug', 'home_path', 'active'],
           through: { attributes: [] }
         }
       ],

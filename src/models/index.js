@@ -36,6 +36,7 @@ const EventJamMusicSuggestionParticipant = require('./EventJamMusicSuggestionPar
 const EventJamMusicCatalog = require('./EventJamMusicCatalog');
 const Organization = require('./Organization');
 const StoreMember = require('./StoreMember');
+const StoreInvite = require('./StoreInvite');
 
 // Define associations
 
@@ -52,6 +53,18 @@ StoreMember.belongsTo(Store, { foreignKey: 'store_id', as: 'store' });
 
 User.hasMany(StoreMember, { foreignKey: 'user_id', as: 'storeMemberships' });
 StoreMember.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+
+Store.hasMany(StoreInvite, { foreignKey: 'store_id', as: 'invites' });
+StoreInvite.belongsTo(Store, { foreignKey: 'store_id', as: 'store' });
+
+User.hasMany(StoreInvite, { foreignKey: 'created_by_user_id', as: 'createdStoreInvites' });
+StoreInvite.belongsTo(User, { foreignKey: 'created_by_user_id', as: 'createdBy' });
+
+User.hasMany(StoreInvite, { foreignKey: 'invited_user_id', as: 'receivedStoreInvites' });
+StoreInvite.belongsTo(User, { foreignKey: 'invited_user_id', as: 'invitedUser' });
+
+User.hasMany(StoreInvite, { foreignKey: 'accepted_user_id', as: 'acceptedStoreInvites' });
+StoreInvite.belongsTo(User, { foreignKey: 'accepted_user_id', as: 'acceptedUser' });
 
 // Many-to-Many Store <-> User via StoreMember
 Store.belongsToMany(User, { through: StoreMember, foreignKey: 'store_id', otherKey: 'user_id', as: 'members' });
@@ -315,4 +328,5 @@ module.exports = {
   ,EventJamMusicCatalog
   ,Organization
   ,StoreMember
+  ,StoreInvite
 };
