@@ -28,6 +28,10 @@ jest.mock('../middlewares/storeContext', () => ({
   }
 }));
 
+jest.mock('../middlewares/storePermissions', () => ({
+  requireStorePermission: () => (req, res, next) => next()
+}));
+
 // MOCK MODELS
 jest.mock('../models', () => {
   const Sequelize = require('sequelize');

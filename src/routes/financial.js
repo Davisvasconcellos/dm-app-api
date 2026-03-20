@@ -1,7 +1,8 @@
 const express = require('express');
 const { body, query, validationResult } = require('express-validator');
-const { authenticateToken, requireRole, requireModule } = require('../middlewares/auth');
+const { authenticateToken, requireModule } = require('../middlewares/auth');
 const { requireStoreContext, requireStoreAccess } = require('../middlewares/storeContext');
+const { requireStorePermission } = require('../middlewares/storePermissions');
 const { FinancialTransaction, User, FinTag, FinCategory, FinCostCenter, Party, sequelize } = require('../models');
 const { Op, Sequelize } = require('sequelize');
 const { URL } = require('url');
@@ -265,9 +266,9 @@ router.get(
   '/transactions',
   authenticateToken,
   requireModule('financial'),
-  requireRole('admin', 'manager', 'master'),
   requireStoreContext({ allowMissingForRoles: [] }),
   requireStoreAccess,
+  requireStorePermission(['financial:read', 'financial:write']),
   [
     query('page').optional().isInt({ min: 1 }).toInt(),
     query('limit').optional().isInt({ min: 1, max: 2000 }).toInt(),
@@ -552,9 +553,9 @@ router.post(
   '/transactions',
   authenticateToken,
   requireModule('financial'),
-  requireRole('admin', 'manager', 'master'),
   requireStoreContext({ allowMissingForRoles: [] }),
   requireStoreAccess,
+  requireStorePermission(['financial:write']),
   [
     body('type')
       .isIn(VALID_TYPES),
@@ -858,9 +859,9 @@ router.patch(
   '/transactions/:id_code',
   authenticateToken,
   requireModule('financial'),
-  requireRole('admin', 'manager', 'master'),
   requireStoreContext({ allowMissingForRoles: [] }),
   requireStoreAccess,
+  requireStorePermission(['financial:write']),
   [
     body('type')
       .optional()
