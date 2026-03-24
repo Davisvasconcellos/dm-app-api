@@ -1,6 +1,5 @@
-// src/middlewares/auth.js
 const jwt = require('jsonwebtoken');
-const { User, TokenBlocklist } = require('../models');
+const { User, TokenBlocklist, Store, StoreMember, SysModule } = require('../models');
 
 // Cache em memória para blocklist de tokens (evita query ao banco a cada request)
 // TTL de 60 segundos: tempo máximo que um token invalidado pode ser considerado válido
@@ -160,16 +159,58 @@ const requireModule = (moduleSlug) => {
         return next();
       }
 
+      const headerStoreId = req.headers['x-store-id'] || req.headers['x-context-store-id'];
+      const storeId = headerStoreId || req.query.store_id || req.body.store_id || null;
+
+      if (storeId) {
+        const store = await Store.findOne({ where: { id_code: String(storeId) }, attributes: ['id'] });
+        if (store) {
+          const member = await StoreMember.findOne({
+            where: { store_id: store.id, user_id: req.user.userId, status: 'active' },
+            attributes: ['role', 'permissions']
+          });
+
+          if (member) {
+            if (member.role === 'manager') {
+              return next();
+            }
+
+            const memberPermissions = Array.isArray(member.permissions) ? member.permissions : [];
+            if (memberPermissions.includes(`${moduleSlug}:read`) || memberPermissions.includes(`${moduleSlug}:write`)) {
+              return next();
+            }
+          }
+        }
+      }
+      if (!storeId) {
+        const memberships = await StoreMember.findAll({
+          where: { user_id: req.user.userId, status: 'active' },
+          attributes: ['role', 'permissions'],
+          limit: 50
+        });
+
+        const hasModuleAccess = memberships.some((m) => {
+          if (m.role === 'manager') return true;
+          const memberPermissions = Array.isArray(m.permissions) ? m.permissions : [];
+          return memberPermissions.includes(`${moduleSlug}:read`) || memberPermissions.includes(`${moduleSlug}:write`);
+        });
+
+        if (hasModuleAccess) {
+          return next();
+        }
+      }
+
       const user = await User.findByPk(req.user.userId, {
-        include: [{ 
-          model: require('../models').SysModule,
-          as: 'modules',
-          where: { slug: moduleSlug, active: true },
-          required: false 
-        }]
+        include: [
+          {
+            model: SysModule,
+            as: 'modules',
+            where: { slug: moduleSlug, active: true },
+            required: false
+          }
+        ]
       });
 
-      // Se encontrou o módulo na lista do usuário
       if (user && user.modules && user.modules.length > 0) {
         return next();
       }

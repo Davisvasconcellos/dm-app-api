@@ -91,7 +91,7 @@ router.post('/login', [
           include: [{ 
             model: Store, 
             as: 'store',
-            attributes: ['id_code', 'name', 'slug'],
+            attributes: ['id_code', 'name', 'slug', 'logo_url', 'banner_url'],
             include: [{ model: Organization, as: 'organization', attributes: ['id_code', 'name'] }] 
           }]
         }
@@ -207,7 +207,7 @@ router.post('/google', [
         include: [{ 
           model: Store, 
           as: 'store',
-          attributes: ['id_code', 'name', 'slug'],
+          attributes: ['id_code', 'name', 'slug', 'logo_url', 'banner_url'],
           include: [{ model: Organization, as: 'organization', attributes: ['id_code', 'name'] }] 
         }]
       }
@@ -427,7 +427,7 @@ router.get('/me', authenticateToken, async (req, res) => {
           include: [{ 
             model: Store, 
             as: 'store',
-            attributes: ['id_code', 'name', 'slug'],
+            attributes: ['id_code', 'name', 'slug', 'logo_url', 'banner_url'],
             include: [{ model: Organization, as: 'organization', attributes: ['id_code', 'name'] }] 
           }]
         }
@@ -440,6 +440,11 @@ router.get('/me', authenticateToken, async (req, res) => {
         message: 'Usuário não encontrado no banco de dados.'
       });
     }
+
+    // Evitar respostas 304 com payload antigo em /me (dados do usuário mudam com frequência)
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
 
     res.json({
       success: true,

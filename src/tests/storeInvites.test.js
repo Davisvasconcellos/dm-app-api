@@ -120,6 +120,35 @@ describe('Store Invites', () => {
     expect(invite.update).toHaveBeenCalled();
   });
 
+  it('accepts invite by id_code and creates membership', async () => {
+    const invite = {
+      id_code: 'inv-2',
+      invited_email: 'admin@example.com',
+      status: 'pending',
+      expires_at: new Date(Date.now() + 60_000),
+      store_id: 10,
+      role: 'collaborator',
+      permissions: ['financial:read'],
+      invited_user_id: null,
+      update: jest.fn().mockResolvedValue(true)
+    };
+
+    StoreInvite.findOne.mockResolvedValue(invite);
+    Store.findByPk.mockResolvedValue({ id: 10, id_code: 'store-uuid-1', name: 'Loja Teste' });
+    StoreMember.findOne.mockResolvedValue(null);
+    StoreMember.create.mockResolvedValue({ id_code: 'mem-2' });
+
+    const app = makeApp();
+    const res = await request(app)
+      .post('/api/v1/store-invites/inv-2/accept')
+      .send({});
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(StoreMember.create).toHaveBeenCalled();
+    expect(invite.update).toHaveBeenCalled();
+  });
+
   it('resolves invite publicly', async () => {
     StoreInvite.findOne.mockResolvedValue({
       id_code: 'inv-1',

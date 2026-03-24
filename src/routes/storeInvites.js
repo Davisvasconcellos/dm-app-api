@@ -212,6 +212,72 @@ async function assertCanManageInvites(req) {
   throw error;
 }
 
+/**
+ * @swagger
+ * /api/v1/store-invites/my:
+ *   get:
+ *     summary: Listar convites do usuário autenticado
+ *     tags: [Stores]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *           enum: [pending, accepted, revoked, expired]
+ *         description: "Filtrar por status (padrão: pending)"
+ *     responses:
+ *       200:
+ *         description: Lista de convites do usuário
+ */
+router.get('/my', [
+  authenticateToken,
+  query('status').optional().isIn(['pending', 'accepted', 'revoked', 'expired'])
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ error: 'Validation error', details: errors.array() });
+  }
+
+  try {
+    const email = (req.user.email || '').toLowerCase();
+    const status = req.query.status || 'pending';
+
+    const invites = await StoreInvite.findAll({
+      where: {
+        status,
+        [Op.or]: [
+          { invited_user_id: req.user.userId },
+          { invited_email: email }
+        ]
+      },
+      include: [{
+        model: Store,
+        as: 'store',
+        attributes: ['id_code', 'name', 'slug']
+      }],
+      order: [['created_at', 'DESC']],
+      attributes: [
+        'id_code',
+        'invited_email',
+        'role',
+        'permissions',
+        'status',
+        'expires_at',
+        'accepted_at',
+        'revoked_at',
+        'created_at'
+      ]
+    });
+
+    return res.json({ success: true, data: invites });
+  } catch (error) {
+    console.error('My invites list error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 router.get('/', [
   authenticateToken,
   requireStoreContext({ allowMissingForRoles: [] }),
@@ -403,6 +469,98 @@ router.post('/:id_code/revoke', [
       return res.status(403).json({ error: 'Forbidden', message: 'Sem permissão para gerenciar convites' });
     }
     console.error('StoreInvites revoke error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/v1/store-invites/{id_code}/accept:
+ *   post:
+ *     summary: Aceitar convite por id_code (usuário autenticado)
+ *     tags: [Stores]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id_code
+ *         schema:
+ *           type: string
+ *         required: true
+ *     responses:
+ *       200:
+ *         description: Convite aceito
+ *       400:
+ *         description: Erro de validação
+ *       403:
+ *         description: Convite não pertence ao e-mail do usuário
+ *       404:
+ *         description: Convite não encontrado
+ */
+router.post('/:id_code/accept', [
+  authenticateToken
+], async (req, res) => {
+  try {
+    const invite = await StoreInvite.findOne({ where: { id_code: req.params.id_code } });
+    if (!invite) {
+      return res.status(404).json({ error: 'Not Found', message: 'Convite inválido' });
+    }
+
+    if (invite.status !== 'pending') {
+      return res.status(400).json({ error: 'Validation error', message: 'Convite não está pendente' });
+    }
+
+    if (invite.expires_at && new Date(invite.expires_at).getTime() < Date.now()) {
+      await invite.update({ status: 'expired' });
+      return res.status(400).json({ error: 'Validation error', message: 'Convite expirado' });
+    }
+
+    if (!req.user.email || String(req.user.email).toLowerCase() !== String(invite.invited_email).toLowerCase()) {
+      return res.status(403).json({ error: 'Forbidden', message: 'Este convite não pertence ao seu e-mail' });
+    }
+
+    const store = await Store.findByPk(invite.store_id);
+    if (!store) {
+      return res.status(404).json({ error: 'Not Found', message: 'Loja não encontrada' });
+    }
+
+    const result = await sequelize.transaction(async (t) => {
+      const existingMember = await StoreMember.findOne({
+        where: { store_id: invite.store_id, user_id: req.user.userId },
+        transaction: t
+      });
+
+      if (existingMember) {
+        await existingMember.update(
+          { role: invite.role, permissions: invite.permissions, status: 'active' },
+          { transaction: t }
+        );
+      } else {
+        await StoreMember.create(
+          {
+            store_id: invite.store_id,
+            user_id: req.user.userId,
+            invited_email: invite.invited_email,
+            role: invite.role,
+            permissions: invite.permissions,
+            status: 'active'
+          },
+          { transaction: t }
+        );
+      }
+
+      const updatePayload = { status: 'accepted', accepted_user_id: req.user.userId, accepted_at: new Date() };
+      if (!invite.invited_user_id) {
+        updatePayload.invited_user_id = req.user.userId;
+      }
+      await invite.update(updatePayload, { transaction: t });
+
+      return invite;
+    });
+
+    return res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('StoreInvites accept-by-id error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
