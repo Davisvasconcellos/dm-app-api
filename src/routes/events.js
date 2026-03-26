@@ -190,8 +190,8 @@ router.post('/', authenticateToken, requireRole('admin', 'master'), requireModul
   body('color_2').optional().isString(),
   body('card_background').optional().isString(),
   body('card_background_type').optional().isInt({ min: 0, max: 1 }),
-  body('start_datetime').isISO8601().toDate().withMessage('start_datetime é obrigatório e deve ser uma data válida.'),
-  body('end_datetime').isISO8601().toDate().withMessage('end_datetime é obrigatório e deve ser uma data válida.'),
+  body('start_datetime').isISO8601().withMessage('start_datetime é obrigatório e deve ser uma data válida.'),
+  body('end_datetime').isISO8601().withMessage('end_datetime é obrigatório e deve ser uma data válida.'),
   body('auto_checkin').optional().isBoolean(),
   body('requires_auto_checkin').optional().isBoolean(),
   body('auto_checkin_flow_quest').optional().isBoolean(),
@@ -229,6 +229,25 @@ router.post('/', authenticateToken, requireRole('admin', 'master'), requireModul
   const creatorId = req.user.userId;
 
   try {
+    const normalizeLocalIso = (value) => {
+      if (!value) return null;
+      if (typeof value === 'string') {
+        const parts = value.split('T');
+        if (parts.length < 2) return null;
+        const datePart = parts[0];
+        const timePart = String(parts[1]).substring(0, 5);
+        if (!datePart || timePart.length < 4) return null;
+        return `${datePart}T${timePart}`;
+      }
+      if (value instanceof Date && !isNaN(value.getTime())) {
+        const pad2 = (n) => String(n).padStart(2, '0');
+        const datePart = `${value.getFullYear()}-${pad2(value.getMonth() + 1)}-${pad2(value.getDate())}`;
+        const timePart = `${pad2(value.getHours())}:${pad2(value.getMinutes())}`;
+        return `${datePart}T${timePart}`;
+      }
+      return null;
+    };
+
     // Slug único
     const existing = await Event.findOne({ where: { slug } });
     if (existing) {
@@ -236,9 +255,33 @@ router.post('/', authenticateToken, requireRole('admin', 'master'), requireModul
     }
 
     // Validação de ordem das datas: end_datetime não pode ser anterior a start_datetime
-    if (start_datetime && end_datetime && end_datetime < start_datetime) {
-      return res.status(400).json({ error: 'Validation error', message: 'end_datetime não pode ser anterior a start_datetime' });
+    const startNorm = normalizeLocalIso(start_datetime);
+    const endNorm = normalizeLocalIso(end_datetime);
+    if (startNorm && endNorm) {
+      const startDatePart = startNorm.split('T')[0];
+      const endDatePart = endNorm.split('T')[0];
+      if (startDatePart !== endDatePart) {
+        return res.status(400).json({ error: 'Validation error', message: 'end_datetime deve ser no mesmo dia do start_datetime' });
+      }
+      if (endNorm < startNorm) {
+        return res.status(400).json({ error: 'Validation error', message: 'end_datetime não pode ser anterior a start_datetime' });
+      }
     }
+
+    if (!startNorm) {
+      return res.status(400).json({ error: 'Validation error', message: 'start_datetime inválido ou ausente' });
+    }
+
+    if (!endNorm) {
+      return res.status(400).json({ error: 'Validation error', message: 'end_datetime inválido ou ausente' });
+    }
+
+    const startParts = startNorm.split('T');
+    const endParts = endNorm.split('T');
+
+    const date = startParts[0];
+    const start_time_val = startParts[1];
+    const end_time_val = endParts[1];
 
     const t = await sequelize.transaction();
     try {
@@ -246,39 +289,6 @@ router.post('/', authenticateToken, requireRole('admin', 'master'), requireModul
       const inferredType = (card_background_type !== undefined)
         ? card_background_type
         : (card_background ? 1 : ((color_1 || color_2) ? 0 : null));
-
-      // Process dates for Postgres (DATE + TIME fields)
-      let date = null;
-      let start_time_val = null;
-      let end_time_val = null;
-
-      if (start_datetime) {
-        try {
-          const dt = new Date(start_datetime);
-          if (!isNaN(dt.getTime())) {
-             date = dt.toISOString().split('T')[0];
-             start_time_val = dt.toISOString().split('T')[1].substring(0, 5); // HH:mm
-          }
-        } catch (e) {
-          console.error('Error parsing start_datetime:', e);
-        }
-      }
-
-      if (end_datetime) {
-        try {
-          const dt = new Date(end_datetime);
-          if (!isNaN(dt.getTime())) {
-             end_time_val = dt.toISOString().split('T')[1].substring(0, 5); // HH:mm
-          }
-        } catch (e) {
-          console.error('Error parsing end_datetime:', e);
-        }
-      }
-
-      if (!date) {
-        await t.rollback();
-        return res.status(400).json({ error: 'Validation error', message: 'start_datetime inválido ou ausente' });
-      }
 
       const event = await Event.create({
         name,
@@ -680,8 +690,8 @@ router.patch('/:id', authenticateToken, requireRole('admin', 'master'), requireM
   body('color_2').optional().isString(),
   body('card_background').optional().isString(),
   body('card_background_type').optional().isInt({ min: 0, max: 1 }),
-  body('start_datetime').optional().isISO8601().toDate().withMessage('start_datetime deve ser uma data válida'),
-  body('end_datetime').optional().isISO8601().toDate().withMessage('end_datetime deve ser uma data válida'),
+  body('start_datetime').optional().isISO8601().withMessage('start_datetime deve ser uma data válida'),
+  body('end_datetime').optional().isISO8601().withMessage('end_datetime deve ser uma data válida'),
   body('auto_checkin').optional().isBoolean(),
   body('requires_auto_checkin').optional().isBoolean(),
   body('auto_checkin_flow_quest').optional().isBoolean(),
@@ -718,10 +728,40 @@ router.patch('/:id', authenticateToken, requireRole('admin', 'master'), requireM
     }
 
     // Validação de ordem das datas no PATCH: calcula valores finais e compara
-    const newStart = updateData.start_datetime !== undefined ? updateData.start_datetime : event.start_datetime;
-    const newEnd = updateData.end_datetime !== undefined ? updateData.end_datetime : event.end_datetime;
-    if (newStart && newEnd && newEnd < newStart) {
-      return res.status(400).json({ error: 'Validation error', message: 'end_datetime não pode ser anterior a start_datetime' });
+    const normalizeLocalIso = (value) => {
+      if (!value) return null;
+      if (typeof value === 'string') {
+        const parts = value.split('T');
+        if (parts.length < 2) return null;
+        const datePart = parts[0];
+        const timePart = String(parts[1]).substring(0, 5);
+        if (!datePart || timePart.length < 4) return null;
+        return `${datePart}T${timePart}`;
+      }
+      if (value instanceof Date && !isNaN(value.getTime())) {
+        const pad2 = (n) => String(n).padStart(2, '0');
+        const datePart = `${value.getFullYear()}-${pad2(value.getMonth() + 1)}-${pad2(value.getDate())}`;
+        const timePart = `${pad2(value.getHours())}:${pad2(value.getMinutes())}`;
+        return `${datePart}T${timePart}`;
+      }
+      return null;
+    };
+
+    const baseStart = event.date && event.start_time ? `${event.date}T${String(event.start_time).substring(0, 5)}` : null;
+    const baseEnd = event.date && event.end_time ? `${event.date}T${String(event.end_time).substring(0, 5)}` : null;
+
+    const newStart = updateData.start_datetime !== undefined ? normalizeLocalIso(updateData.start_datetime) : baseStart;
+    const newEnd = updateData.end_datetime !== undefined ? normalizeLocalIso(updateData.end_datetime) : baseEnd;
+
+    if (newStart && newEnd) {
+      const startDatePart = newStart.split('T')[0];
+      const endDatePart = newEnd.split('T')[0];
+      if (startDatePart !== endDatePart) {
+        return res.status(400).json({ error: 'Validation error', message: 'end_datetime deve ser no mesmo dia do start_datetime' });
+      }
+      if (newEnd < newStart) {
+        return res.status(400).json({ error: 'Validation error', message: 'end_datetime não pode ser anterior a start_datetime' });
+      }
     }
 
     // Se não enviar explicitamente o tipo, mas alterar os campos de fundo, re-inferir
@@ -732,28 +772,24 @@ router.patch('/:id', authenticateToken, requireRole('admin', 'master'), requireM
       updateData.card_background_type = finalCardBackground ? 1 : ((finalColor1 || finalColor2) ? 0 : null);
     }
 
-    // Process dates for Postgres (DATE + TIME fields)
+    // Process dates for Postgres (DATE + TIME fields) preserving local input
     if (updateData.start_datetime) {
-      try {
-        const dt = new Date(updateData.start_datetime);
-        if (!isNaN(dt.getTime())) {
-           updateData.date = dt.toISOString().split('T')[0];
-           updateData.start_time = dt.toISOString().split('T')[1].substring(0, 5); // HH:mm
-        }
-      } catch (e) {
-        console.error('Error parsing start_datetime:', e);
+      const norm = normalizeLocalIso(updateData.start_datetime);
+      if (norm) {
+        const parts = norm.split('T');
+        updateData.date = parts[0];
+        updateData.start_time = parts[1];
       }
+      delete updateData.start_datetime;
     }
 
     if (updateData.end_datetime) {
-      try {
-        const dt = new Date(updateData.end_datetime);
-        if (!isNaN(dt.getTime())) {
-           updateData.end_time = dt.toISOString().split('T')[1].substring(0, 5); // HH:mm
-        }
-      } catch (e) {
-        console.error('Error parsing end_datetime:', e);
+      const norm = normalizeLocalIso(updateData.end_datetime);
+      if (norm) {
+        const parts = norm.split('T');
+        updateData.end_time = parts[1];
       }
+      delete updateData.end_datetime;
     }
 
     await event.update(updateData);
