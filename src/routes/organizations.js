@@ -15,10 +15,10 @@ router.get('/me', authenticateToken, async (req, res) => {
     const ownedOrgs = await Organization.findAll({
       where: { owner_id: userId, status: 'active' },
       include: [
-        { 
-          model: Store, 
+        {
+          model: Store,
           as: 'stores',
-          attributes: ['id', 'id_code', 'name', 'slug', 'status']
+          attributes: ['id', 'id_code', 'name', 'slug', 'logo_url', 'banner_url', 'status']
         }
       ]
     });
@@ -26,14 +26,14 @@ router.get('/me', authenticateToken, async (req, res) => {
     // 2. Stores I am a member of (excluding ones I own via organization, to avoid duplicates if we auto-add owner as member)
     // Actually, good practice: Owner should ALSO be a StoreMember to unify permission logic.
     // So we just query StoreMember.
-    
+
     const memberships = await StoreMember.findAll({
       where: { user_id: userId, status: 'active' },
       include: [
         {
           model: Store,
           as: 'store',
-          include: [{ model: Organization, as: 'organization', attributes: ['id', 'id_code', 'name'] }]
+          include: [{ model: Organization, as: 'organization', attributes: ['id', 'id_code', 'name', 'logo_url', 'banner_url'] }]
         }
       ]
     });
@@ -44,7 +44,9 @@ router.get('/me', authenticateToken, async (req, res) => {
         id: o.id_code,
         name: o.name,
         plan: o.plan_tier,
-        stores: o.stores.map(s => ({ id: s.id_code, name: s.name, slug: s.slug }))
+        logo_url: o.logo_url,
+        banner_url: o.banner_url,
+        stores: o.stores.map(s => ({ id: s.id_code, name: s.name, slug: s.slug, logo_url: s.logo_url, banner_url: s.banner_url }))
       })),
       memberships: memberships.map(m => ({
         store_id: m.store.id_code,
@@ -73,20 +75,20 @@ router.get('/:id_code/stores', authenticateToken, async (req, res) => {
     if (!org) return res.status(404).json({ error: 'Not Found', message: 'Organização não encontrada' });
 
     const isOwner = org.owner_id === userId;
-    
+
     // If not owner, check membership in any store of this org
     let allowedStoreIds = [];
     if (!isOwner) {
       const memberships = await StoreMember.findAll({
         where: { user_id: userId, status: 'active' },
-        include: [{ 
-          model: Store, 
-          as: 'store', 
+        include: [{
+          model: Store,
+          as: 'store',
           where: { organization_id: org.id },
           attributes: ['id']
         }]
       });
-      
+
       if (memberships.length === 0) {
         return res.status(403).json({ error: 'Forbidden', message: 'Sem permissão para visualizar lojas desta organização' });
       }
@@ -168,7 +170,7 @@ router.post('/:id_code/stores', authenticateToken, [
 
     // 3. Create Store
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + uuidv4().substring(0, 8);
-    
+
     const store = await Store.create({
       organization_id: org.id,
       owner_id: userId, // Store owner matches Org owner
@@ -222,8 +224,8 @@ router.post('/:id_code/stores', authenticateToken, [
 
     await t.commit();
 
-    res.status(201).json({ 
-      success: true, 
+    res.status(201).json({
+      success: true,
       message: 'Loja criada com sucesso',
       data: {
         id: store.id_code,
@@ -257,10 +259,10 @@ router.post('/', authenticateToken, [
     // Check if user already has an active organization
     const existingOrg = await Organization.findOne({ where: { owner_id: userId, status: 'active' } });
     if (existingOrg) {
-        return res.status(409).json({ 
-            error: 'Conflict', 
-            message: 'Usuário já possui uma organização ativa. Para criar mais, contate o suporte ou use um plano superior.' 
-        });
+      return res.status(409).json({
+        error: 'Conflict',
+        message: 'Usuário já possui uma organização ativa. Para criar mais, contate o suporte ou use um plano superior.'
+      });
     }
 
     // Transaction ideally
@@ -276,7 +278,7 @@ router.post('/', authenticateToken, [
     // Create Default Store (Matriz)
     const storeName = `${name} (Matriz)`;
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + uuidv4().substring(0, 8);
-    
+
     const store = await Store.create({
       organization_id: org.id,
       owner_id: userId, // Define o owner da loja igual ao owner da organização
@@ -294,8 +296,8 @@ router.post('/', authenticateToken, [
       status: 'active'
     });
 
-    res.status(201).json({ 
-      success: true, 
+    res.status(201).json({
+      success: true,
       data: {
         organization: { id: org.id_code, name: org.name, logo_url: org.logo_url, banner_url: org.banner_url },
         store: { id: store.id_code, name: store.name, slug: store.slug }

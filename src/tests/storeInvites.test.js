@@ -33,6 +33,7 @@ jest.mock('../models', () => {
 
   const StoreMember = {
     findOne: jest.fn(),
+    findAll: jest.fn(),
     create: jest.fn()
   };
 
@@ -68,6 +69,40 @@ function makeApp() {
 describe('Store Invites', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  it('lists invites and includes store_member_id_code for accepted users', async () => {
+    StoreInvite.findAll.mockResolvedValue([
+      {
+        toJSON: () => ({
+          id_code: 'inv-1',
+          invited_email: 'user@example.com',
+          invited_user_id: 19,
+          accepted_user_id: 19,
+          role: 'collaborator',
+          permissions: [],
+          status: 'accepted',
+          expires_at: null,
+          accepted_at: null,
+          revoked_at: null,
+          created_at: new Date().toISOString()
+        })
+      }
+    ]);
+
+    StoreMember.findAll.mockResolvedValue([
+      { toJSON: () => ({ id_code: 'mem-uuid-1', user_id: 19, status: 'active' }) }
+    ]);
+
+    const app = makeApp();
+    const res = await request(app)
+      .get('/api/v1/store-invites')
+      .query({ store_id: 'store-uuid-1' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data[0].store_member_id_code).toBe('mem-uuid-1');
+    expect(res.body.data[0].store_member_status).toBe('active');
   });
 
   it('creates invite and returns link', async () => {

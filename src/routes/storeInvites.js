@@ -301,17 +301,55 @@ router.get('/', [
       attributes: [
         'id_code',
         'invited_email',
+        'invited_user_id',
         'role',
         'permissions',
         'status',
         'expires_at',
+        'accepted_user_id',
         'accepted_at',
         'revoked_at',
         'created_at'
       ]
     });
 
-    return res.json({ success: true, data: invites });
+    const normalize = (record) => (record && typeof record.toJSON === 'function') ? record.toJSON() : record;
+    const baseInvites = invites.map(normalize);
+    const acceptedUserIds = Array.from(
+      new Set(
+        baseInvites
+          .map((i) => i.accepted_user_id || i.invited_user_id)
+          .filter((v) => v !== null && v !== undefined)
+          .map((v) => Number(v))
+          .filter((v) => !Number.isNaN(v))
+      )
+    );
+
+    let memberIdCodeByUserId = new Map();
+    if (acceptedUserIds.length) {
+      const members = await StoreMember.findAll({
+        where: { store_id: req.storeDbId, user_id: { [Op.in]: acceptedUserIds } },
+        attributes: ['id_code', 'user_id', 'status']
+      });
+
+      memberIdCodeByUserId = new Map(
+        members
+          .map(normalize)
+          .map((m) => [Number(m.user_id), { id_code: m.id_code, status: m.status }])
+      );
+    }
+
+    const payload = baseInvites.map((inv) => {
+      const userId = Number(inv.accepted_user_id || inv.invited_user_id);
+      const member = Number.isNaN(userId) ? null : memberIdCodeByUserId.get(userId) || null;
+      return {
+        ...inv,
+        store_member_id_code: member ? member.id_code : null,
+        store_member_status: member ? member.status : null
+      };
+    });
+
+    return res.json({ success: true, data: payload });
   } catch (error) {
     if (error.code === 'forbidden') {
       return res.status(403).json({ error: 'Forbidden', message: 'Sem permissão para gerenciar convites' });

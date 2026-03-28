@@ -82,17 +82,17 @@ router.post('/login', [
         {
           model: Organization,
           as: 'ownedOrganizations',
-          attributes: ['id_code', 'name', 'plan_tier'],
-          include: [{ model: Store, as: 'stores', attributes: ['id_code', 'name', 'slug'] }]
+          attributes: ['id_code', 'name', 'plan_tier', 'logo_url', 'banner_url'],
+          include: [{ model: Store, as: 'stores', attributes: ['id_code', 'name', 'slug', 'logo_url', 'banner_url'] }]
         },
         {
           model: StoreMember,
           as: 'storeMemberships',
-          include: [{ 
-            model: Store, 
+          include: [{
+            model: Store,
             as: 'store',
             attributes: ['id_code', 'name', 'slug', 'logo_url', 'banner_url'],
-            include: [{ model: Organization, as: 'organization', attributes: ['id_code', 'name'] }] 
+            include: [{ model: Organization, as: 'organization', attributes: ['id_code', 'name', 'logo_url', 'banner_url'] }]
           }]
         }
       ]
@@ -198,17 +198,17 @@ router.post('/google', [
       {
         model: Organization,
         as: 'ownedOrganizations',
-        attributes: ['id_code', 'name', 'plan_tier'],
-        include: [{ model: Store, as: 'stores', attributes: ['id_code', 'name', 'slug'] }]
+        attributes: ['id_code', 'name', 'plan_tier', 'logo_url', 'banner_url'],
+        include: [{ model: Store, as: 'stores', attributes: ['id_code', 'name', 'slug', 'logo_url', 'banner_url'] }]
       },
       {
         model: StoreMember,
         as: 'storeMemberships',
-        include: [{ 
-          model: Store, 
+        include: [{
+          model: Store,
           as: 'store',
           attributes: ['id_code', 'name', 'slug', 'logo_url', 'banner_url'],
-          include: [{ model: Organization, as: 'organization', attributes: ['id_code', 'name'] }] 
+          include: [{ model: Organization, as: 'organization', attributes: ['id_code', 'name'] }]
         }]
       }
     ];
@@ -418,17 +418,17 @@ router.get('/me', authenticateToken, async (req, res) => {
         {
           model: Organization,
           as: 'ownedOrganizations',
-          attributes: ['id_code', 'name', 'plan_tier'],
-          include: [{ model: Store, as: 'stores', attributes: ['id_code', 'name', 'slug'] }]
+          attributes: ['id_code', 'name', 'plan_tier', 'logo_url', 'banner_url'],
+          include: [{ model: Store, as: 'stores', attributes: ['id_code', 'name', 'slug', 'logo_url', 'banner_url'] }]
         },
         {
           model: StoreMember,
           as: 'storeMemberships',
-          include: [{ 
-            model: Store, 
+          include: [{
+            model: Store,
             as: 'store',
             attributes: ['id_code', 'name', 'slug', 'logo_url', 'banner_url'],
-            include: [{ model: Organization, as: 'organization', attributes: ['id_code', 'name'] }] 
+            include: [{ model: Organization, as: 'organization', attributes: ['id_code', 'name', 'logo_url', 'banner_url'] }]
           }]
         }
       ]

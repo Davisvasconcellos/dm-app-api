@@ -79,7 +79,7 @@ const FinancialTransaction = sequelize.define('FinancialTransaction', {
     type: DataTypes.STRING(255),
     allowNull: true,
     references: {
-      model: 'fin_recurrences',
+      model: 'financial_recurrences',
       key: 'id_code'
     }
   },

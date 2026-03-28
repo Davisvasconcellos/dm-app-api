@@ -1,6 +1,6 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const { sequelize, Store, User, Product, StoreUser, StoreSchedule } = require('../models');
+const { sequelize, Store, User, Product, StoreUser, StoreSchedule, StoreMember } = require('../models');
 const { authenticateToken, requireRole, requireModule } = require('../middlewares/auth');
 
 const router = express.Router();
@@ -577,6 +577,50 @@ router.put('/:id_code', authenticateToken, requireRole(['admin', 'manager']), [
     }
   }
 );
+
+router.delete('/:id_code/members/:member_id_code', authenticateToken, async (req, res) => {
+  try {
+    const { id_code, member_id_code } = req.params;
+
+    const store = await Store.findOne({ where: { id_code } });
+    if (!store) {
+      return res.status(404).json({ error: 'Not Found', message: 'Loja não encontrada' });
+    }
+
+    const highPrivilegeRoles = ['admin', 'master', 'masteradmin'];
+    const isOwner = store.owner_id && String(store.owner_id) === String(req.user.userId);
+    const isHighPrivilege = highPrivilegeRoles.includes(req.user.role);
+
+    if (!isHighPrivilege && !isOwner) {
+      const requesterMember = await StoreMember.findOne({
+        where: { store_id: store.id, user_id: req.user.userId, status: 'active' }
+      });
+
+      if (!requesterMember || requesterMember.role !== 'manager') {
+        return res.status(403).json({ error: 'Forbidden', message: 'Sem permissão para gerenciar membros desta loja' });
+      }
+    }
+
+    const member = await StoreMember.findOne({
+      where: { id_code: member_id_code, store_id: store.id }
+    });
+
+    if (!member) {
+      return res.status(404).json({ error: 'Not Found', message: 'Membro não encontrado' });
+    }
+
+    if (store.owner_id && String(member.user_id) === String(store.owner_id)) {
+      return res.status(400).json({ error: 'Validation error', message: 'Não é possível remover o proprietário da loja' });
+    }
+
+    await member.update({ status: 'inactive' });
+
+    return res.json({ success: true, message: 'Membro removido com sucesso' });
+  } catch (error) {
+    console.error('Remove store member error:', error);
+    return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });
+  }
+});
 
 /**
  * @swagger

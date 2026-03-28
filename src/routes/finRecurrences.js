@@ -163,13 +163,14 @@ router.post(
   '/generate',
   authenticateToken,
   requireModule('financial'),
+  requireStoreContext({ allowMissingForRoles: [] }),
   async (req, res) => {
     try {
       const { target_date } = req.body;
       const targetDate = target_date ? new Date(target_date) : new Date();
-      
-      const results = await generatePendingTransactions(targetDate);
-      
+
+      const results = await generatePendingTransactions(targetDate, req.storeId);
+
       res.json({
         message: 'Recurrence generation completed',
         results
@@ -230,11 +231,11 @@ router.post(
       // Let's assume start_date IS the first due date for simplicity, or we calculate the next one.
       // "next_due_date" is required. Let's assume start_date is the first one if not specified or logic needed.
       // But wait, the model requires next_due_date.
-      
+
       // Simple logic: If start_date day <= day_of_month, use current month's day_of_month (if not passed).
       // If start_date day > day_of_month, use next month.
       // For now, let's set next_due_date = start_date as a default initial value if it matches requirements.
-      
+
       const recurrence = await FinRecurrence.create({
         store_id: req.storeId,
         type,
@@ -307,8 +308,8 @@ router.get(
         pages: Math.ceil(count / limit),
         currentPage: parseInt(page),
         data: rows.map(r => ({
-            ...r.toJSON(),
-            id: r.id_code // Frontend compatibility
+          ...r.toJSON(),
+          id: r.id_code // Frontend compatibility
         }))
       });
     } catch (error) {
@@ -335,8 +336,8 @@ router.get('/:id', authenticateToken, requireModule('financial'), requireStoreCo
     }
 
     res.json({
-        ...recurrence.toJSON(),
-        id: recurrence.id_code
+      ...recurrence.toJSON(),
+      id: recurrence.id_code
     });
   } catch (error) {
     console.error('Error fetching recurrence:', error);
@@ -372,7 +373,7 @@ router.patch(
       }
 
       const fieldsToUpdate = [
-        'description', 'amount', 'frequency', 'status', 
+        'description', 'amount', 'frequency', 'status',
         'start_date', 'end_date', 'next_due_date', 'day_of_month',
         'party_id', 'category_id', 'cost_center_id', 'type'
       ];
@@ -388,8 +389,8 @@ router.patch(
 
       // Reload to get associations if needed, or just return
       res.json({
-          ...recurrence.toJSON(),
-          id: recurrence.id_code
+        ...recurrence.toJSON(),
+        id: recurrence.id_code
       });
     } catch (error) {
       console.error('Error updating recurrence:', error);
@@ -415,7 +416,7 @@ router.delete('/:id', authenticateToken, requireModule('financial'), requireStor
     // Let's implement destroy for now, but maybe check for existing transactions?
     // Given the request didn't specify, I'll allow destroy but usually it's safer to just mark as finished.
     // Let's stick to standard DELETE = destroy for now.
-    
+
     await recurrence.destroy();
 
     res.json({ message: 'Recurrence deleted successfully' });

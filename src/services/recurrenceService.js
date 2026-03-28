@@ -77,20 +77,10 @@ const calculateNextDueDate = (currentDate, frequency, dayOfMonth) => {
   return `${year}-${month}-${day}`;
 };
 
-const generatePendingTransactions = async (targetDateInput = new Date()) => {
+const generatePendingTransactions = async (targetDateInput = new Date(), storeId = null) => {
   const t = await sequelize.transaction();
 
   try {
-    // Convert input to Date if string, but we want to compare DATEONLY fields.
-    // The issue is likely that targetDate '2026-01-01' is treated as UTC 00:00:00.
-    // If next_due_date is '2026-01-21', it is greater than targetDate, so no match.
-    // However, the user claims one recurrence has start_date '2026-01-01' and next_due_date '2026-01-01'.
-    // If target_date is '2026-01-01', it should match [Op.lte].
-    // Let's ensure targetDate covers the whole day or is strictly parsed.
-
-    // If targetDateInput is "2026-01-01", new Date() makes it 2026-01-01T00:00:00.000Z.
-    // Database DATEONLY '2026-01-01' is usually compared as string or date at 00:00.
-
     // Let's format targetDate to YYYY-MM-DD string for safer comparison with DATEONLY
     const d = new Date(targetDateInput);
     const year = d.getUTCFullYear();
@@ -99,44 +89,61 @@ const generatePendingTransactions = async (targetDateInput = new Date()) => {
     const targetDateStr = `${year}-${month}-${day}`;
 
     // Find active recurrences due on or before targetDate
-    const dueRecurrences = await FinRecurrence.findAll({
-      where: {
-        status: 'active',
-        next_due_date: {
-          [Op.lte]: targetDateStr
-        },
-        [Op.or]: [
-          { end_date: null },
-          { end_date: { [Op.gte]: targetDateStr } }
-        ]
+    const where = {
+      status: 'active',
+      next_due_date: {
+        [Op.lte]: targetDateStr
       },
+      [Op.or]: [
+        { end_date: null },
+        { end_date: { [Op.gte]: targetDateStr } }
+      ]
+    };
+
+    if (storeId) {
+      where.store_id = storeId;
+    }
+
+    const dueRecurrences = await FinRecurrence.findAll({
+      where,
       transaction: t
     });
 
     const results = {
       processed: 0,
       generated: 0,
+      skipped: 0,
       errors: 0,
       details: []
     };
 
-    const recurrencePromises = dueRecurrences.map(async (recurrence) => {
+    for (const recurrence of dueRecurrences) {
       try {
-        // Create Transaction
-        await FinancialTransaction.create({
-          store_id: recurrence.store_id,
-          type: recurrence.type,
-          description: recurrence.description,
-          amount: recurrence.amount,
-          due_date: recurrence.next_due_date,
-          status: 'provisioned',
-          recurrence_id: recurrence.id_code,
-          party_id: recurrence.party_id,
-          category_id: recurrence.category_id,
-          cost_center_id: recurrence.cost_center_id,
-          created_by_user_id: recurrence.created_by_user_id,
-          is_paid: false
-        }, { transaction: t });
+        const existingTxn = await FinancialTransaction.findOne({
+          where: {
+            store_id: recurrence.store_id,
+            recurrence_id: recurrence.id_code,
+            due_date: recurrence.next_due_date
+          },
+          transaction: t
+        });
+
+        if (!existingTxn) {
+          await FinancialTransaction.create({
+            store_id: recurrence.store_id,
+            type: recurrence.type,
+            description: recurrence.description,
+            amount: recurrence.amount,
+            due_date: recurrence.next_due_date,
+            status: 'provisioned',
+            recurrence_id: recurrence.id_code,
+            party_id: recurrence.party_id,
+            category_id: recurrence.category_id,
+            cost_center_id: recurrence.cost_center_id,
+            created_by_user_id: recurrence.created_by_user_id,
+            is_paid: false
+          }, { transaction: t });
+        }
 
         // Update Recurrence next_due_date
         const nextDate = calculateNextDueDate(
@@ -154,26 +161,19 @@ const generatePendingTransactions = async (targetDateInput = new Date()) => {
 
         await recurrence.save({ transaction: t });
 
-        return { status: 'fulfilled', currentId: recurrence.id_code, nextDate };
-
+        results.processed++;
+        if (existingTxn) {
+          results.skipped++;
+          results.details.push({ id: recurrence.id_code, status: 'skipped', next_date: nextDate });
+        } else {
+          results.generated++;
+          results.details.push({ id: recurrence.id_code, status: 'success', next_date: nextDate });
+        }
       } catch (err) {
         console.error(`Error processing recurrence ${recurrence.id_code}:`, err);
-        return { status: 'rejected', currentId: recurrence.id_code, error: err.message };
-      }
-    });
-
-    // Aguarda execução em paralelo de todas as promessas no DB
-    const processedResults = await Promise.all(recurrencePromises);
-
-    // Contabiliza sucessos e erros
-    for (const res of processedResults) {
-      results.processed++;
-      if (res.status === 'fulfilled') {
-        results.generated++;
-        results.details.push({ id: res.currentId, status: 'success', next_date: res.nextDate });
-      } else {
+        results.processed++;
         results.errors++;
-        results.details.push({ id: res.currentId, status: 'error', error: res.error });
+        results.details.push({ id: recurrence.id_code, status: 'error', error: err.message });
       }
     }
 
