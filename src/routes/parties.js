@@ -2,7 +2,7 @@ const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { authenticateToken, requireModule } = require('../middlewares/auth');
 const { requireStoreContext, requireStoreAccess } = require('../middlewares/storeContext');
-const { Party, FinancialTransaction, sequelize } = require('../models');
+const { Party, FinancialTransaction, FinancialCommission, FinRecurrence, sequelize } = require('../models');
 const { Op } = require('sequelize');
 
 const router = express.Router();
@@ -330,15 +330,29 @@ router.delete('/:id_code', authenticateToken, requireModule('financial'), requir
       return res.status(404).json({ error: 'Parceiro não encontrado' });
     }
 
-    // Check for transactions
-    const transactionCount = await FinancialTransaction.count({
-        where: { party_id: id_code }
-    });
+    const [transactionCount, commissionCount, recurrenceCount] = await Promise.all([
+      FinancialTransaction.count({
+        where: { store_id: req.storeId, party_id: id_code, is_deleted: false }
+      }),
+      FinancialCommission.count({
+        where: { store_id: req.storeId, commission_seller_id: id_code }
+      }),
+      FinRecurrence.count({
+        where: { store_id: req.storeId, party_id: id_code }
+      })
+    ]);
 
-    if (transactionCount > 0) {
-        // Soft delete (block)
-        await party.update({ status: 'inactive' }); // or blocked
-        return res.json({ message: 'Parceiro inativado pois possui transações vinculadas' });
+    const hasLinks = transactionCount > 0 || commissionCount > 0 || recurrenceCount > 0;
+    if (hasLinks) {
+      await party.update({ status: 'inactive' });
+      return res.json({
+        message: 'Parceiro inativado pois possui vínculos financeiros',
+        links: {
+          transactions: transactionCount,
+          commissions: commissionCount,
+          recurrences: recurrenceCount
+        }
+      });
     }
 
     await party.destroy();
