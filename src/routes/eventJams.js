@@ -419,18 +419,35 @@ router.get('/:id/jams/songs', authenticateToken, requireRole('admin', 'master'),
   return res.json({ success: true, data, meta: { page: parseInt(page), page_size: parseInt(page_size), total } });
 });
 
-router.get('/:id/jams/catalog/:catalogId', authenticateToken, requireRole('admin', 'master'), async (req, res) => {
+router.get('/:id/jams/catalog/:catalogId', authenticateToken, async (req, res) => {
   try {
     const { id, catalogId } = req.params;
     const event = await Event.findOne({ where: { id_code: id } });
     if (!event) return res.status(404).json({ error: 'Not Found', message: 'Evento não encontrado' });
-    if (req.user.role !== 'master' && event.created_by !== req.user.userId) return res.status(403).json({ error: 'Access denied' });
 
     const item = await EventJamMusicCatalog.findOne({
       where: { id_code: catalogId },
-      attributes: ['id_code', 'title', 'artist', 'cover_image', 'lyrics', 'chords', 'updated_at', 'created_at']
+      attributes: ['id', 'id_code', 'title', 'artist', 'cover_image', 'lyrics', 'chords', 'updated_at', 'created_at']
     });
     if (!item) return res.status(404).json({ error: 'Not Found', message: 'Catálogo não encontrado' });
+
+    const highPrivilegeRoles = ['admin', 'master', 'masteradmin'];
+    const isPrivileged = highPrivilegeRoles.includes(req.user.role) || event.created_by === req.user.userId;
+    if (!isPrivileged) {
+      const guest = await EventGuest.findOne({ where: { event_id: event.id, user_id: req.user.userId } });
+      if (!guest || !guest.check_in_at) {
+        return res.status(403).json({ error: 'Access denied', message: 'Check-in obrigatório para visualizar' });
+      }
+    }
+
+    const jams = await EventJam.findAll({ where: { event_id: event.id }, attributes: ['id'] });
+    const jamIds = jams.map(j => j.id);
+    if (jamIds.length) {
+      const songRef = await EventJamSong.findOne({ where: { jam_id: { [Op.in]: jamIds }, catalog_id: item.id }, attributes: ['id'] });
+      if (!songRef) {
+        return res.status(404).json({ error: 'Not Found', message: 'Catálogo não encontrado' });
+      }
+    }
 
     const j = item.toJSON();
     return res.json({ success: true, data: { catalog: { ...j, id: j.id_code } } });
@@ -1014,6 +1031,9 @@ router.get('/:id/jams/open', authenticateToken, async (req, res) => {
 
 router.get('/:id/jams/my/on-stage', authenticateToken, async (req, res) => {
   const { id } = req.params;
+  res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   const event = await Event.findOne({ where: { id_code: id } });
   if (!event) return res.status(404).json({ error: 'Not Found', message: 'Evento não encontrado' });
   const guest = await EventGuest.findOne({ where: { event_id: event.id, user_id: req.user.userId } });
@@ -1025,6 +1045,12 @@ router.get('/:id/jams/my/on-stage', authenticateToken, async (req, res) => {
     order: [['order_index', 'ASC']],
     include: [
       { model: EventJamSongInstrumentSlot, as: 'instrumentSlots' },
+      {
+        model: EventJamMusicCatalog,
+        as: 'catalog',
+        required: false,
+        attributes: ['id_code', [literal(`CASE WHEN "catalog"."lyrics" IS NULL OR "catalog"."lyrics" = '' THEN false ELSE true END`), 'has_lyrics']]
+      },
       { model: EventJamSongCandidate, as: 'candidates' }
     ]
   });
@@ -1034,11 +1060,15 @@ router.get('/:id/jams/my/on-stage', authenticateToken, async (req, res) => {
   const formatSong = (song, index) => {
     const myApp = (song.candidates || []).find(c => c.event_guest_id === guest.id && c.status === 'approved') || null;
     const slots = (song.instrumentSlots || []).map(s => ({ instrument: s.instrument, slots: s.slots, required: s.required, fallback_allowed: s.fallback_allowed }));
+    const hasLyricsRaw = song.catalog && (typeof song.catalog.get === 'function' ? song.catalog.get('has_lyrics') : song.catalog.has_lyrics);
+    const lyrics_available = hasLyricsRaw === true || hasLyricsRaw === 'true';
     return {
       jam: jamsById[song.jam_id] || { id: null },
       id: song.id_code,
       title: song.title,
       artist: song.artist,
+      catalog_id: song.catalog ? song.catalog.id_code : null,
+      lyrics_available,
       status: song.status,
       queue_position: index,
       instrument_slots: slots,
@@ -1081,6 +1111,9 @@ router.get('/:id/jams/my/on-stage', authenticateToken, async (req, res) => {
 
 router.get('/:id/jams/playlist', authenticateToken, async (req, res) => {
   const { id } = req.params;
+  res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   const event = await Event.findOne({ where: { id_code: id } });
   if (!event) return res.status(404).json({ error: 'Not Found', message: 'Evento não encontrado' });
   
@@ -1097,6 +1130,12 @@ router.get('/:id/jams/playlist', authenticateToken, async (req, res) => {
     },
     order: [['order_index', 'ASC']],
     include: [
+      {
+        model: EventJamMusicCatalog,
+        as: 'catalog',
+        required: false,
+        attributes: ['id_code', [literal(`CASE WHEN "catalog"."lyrics" IS NULL OR "catalog"."lyrics" = '' THEN false ELSE true END`), 'has_lyrics']]
+      },
       { 
         model: EventJamSongCandidate, 
         as: 'candidates', 
@@ -1120,11 +1159,15 @@ router.get('/:id/jams/playlist', authenticateToken, async (req, res) => {
       };
     });
 
+    const hasLyricsRaw = song.catalog && (typeof song.catalog.get === 'function' ? song.catalog.get('has_lyrics') : song.catalog.has_lyrics);
+    const lyrics_available = hasLyricsRaw === true || hasLyricsRaw === 'true';
     return {
       jam: jamsById[song.jam_id] || { id: null },
       id: song.id_code,
       title: song.title,
       artist: song.artist,
+      catalog_id: song.catalog ? song.catalog.id_code : null,
+      lyrics_available,
       status: song.status,
       queue_position: index + 1,
       musicians
