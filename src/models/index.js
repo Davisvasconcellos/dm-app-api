@@ -37,6 +37,14 @@ const EventJamMusicSuggestionParticipant = require('./EventJamMusicSuggestionPar
 const EventJamMusicCatalog = require('./EventJamMusicCatalog');
 const EventTicketType = require('./EventTicketType');
 const EventTicket = require('./EventTicket');
+const ProjectProject = require('./ProjectProject');
+const ProjectMember = require('./ProjectMember');
+const ProjectStage = require('./ProjectStage');
+const ProjectTask = require('./ProjectTask');
+const ProjectSession = require('./ProjectSession');
+const ProjectTimeEntry = require('./ProjectTimeEntry');
+const ProjectMemberCost = require('./ProjectMemberCost');
+const ProjectNotification = require('./ProjectNotification');
 const Organization = require('./Organization');
 const StoreMember = require('./StoreMember');
 const StoreInvite = require('./StoreInvite');
@@ -172,6 +180,60 @@ EventTicket.belongsTo(EventTicketType, { foreignKey: 'ticket_type_id', as: 'tick
 
 User.hasMany(EventTicket, { foreignKey: 'user_id', as: 'eventTickets' });
 EventTicket.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+
+Store.hasMany(ProjectProject, { foreignKey: 'store_id', sourceKey: 'id_code', as: 'projects' });
+ProjectProject.belongsTo(Store, { foreignKey: 'store_id', targetKey: 'id_code', as: 'store' });
+
+Party.hasMany(ProjectProject, { foreignKey: 'client_party_id', sourceKey: 'id_code', as: 'projects' });
+ProjectProject.belongsTo(Party, { foreignKey: 'client_party_id', targetKey: 'id_code', as: 'clientParty' });
+
+ProjectProject.belongsTo(User, { foreignKey: 'created_by_user_id', as: 'creator' });
+User.hasMany(ProjectProject, { foreignKey: 'created_by_user_id', as: 'createdProjects' });
+
+ProjectProject.hasMany(ProjectStage, { foreignKey: 'project_id', as: 'stages' });
+ProjectStage.belongsTo(ProjectProject, { foreignKey: 'project_id', as: 'project' });
+
+ProjectStage.hasMany(ProjectTask, { foreignKey: 'stage_id', as: 'tasks' });
+ProjectTask.belongsTo(ProjectStage, { foreignKey: 'stage_id', as: 'stage' });
+
+ProjectProject.hasMany(ProjectMember, { foreignKey: 'project_id', as: 'members' });
+ProjectMember.belongsTo(ProjectProject, { foreignKey: 'project_id', as: 'project' });
+
+User.hasMany(ProjectMember, { foreignKey: 'user_id', as: 'projectMemberships' });
+ProjectMember.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+
+Store.hasMany(ProjectSession, { foreignKey: 'store_id', sourceKey: 'id_code', as: 'projectSessions' });
+ProjectSession.belongsTo(Store, { foreignKey: 'store_id', targetKey: 'id_code', as: 'store' });
+
+User.hasMany(ProjectSession, { foreignKey: 'user_id', as: 'projectSessions' });
+ProjectSession.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+
+ProjectSession.hasMany(ProjectTimeEntry, { foreignKey: 'session_id', as: 'timeEntries' });
+ProjectTimeEntry.belongsTo(ProjectSession, { foreignKey: 'session_id', as: 'session' });
+
+User.hasMany(ProjectTimeEntry, { foreignKey: 'user_id', as: 'projectTimeEntries' });
+ProjectTimeEntry.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+
+ProjectProject.hasMany(ProjectTimeEntry, { foreignKey: 'project_id', as: 'timeEntries' });
+ProjectTimeEntry.belongsTo(ProjectProject, { foreignKey: 'project_id', as: 'project' });
+
+ProjectStage.hasMany(ProjectTimeEntry, { foreignKey: 'stage_id', as: 'timeEntries' });
+ProjectTimeEntry.belongsTo(ProjectStage, { foreignKey: 'stage_id', as: 'stage' });
+
+ProjectTask.hasMany(ProjectTimeEntry, { foreignKey: 'task_id', as: 'timeEntries' });
+ProjectTimeEntry.belongsTo(ProjectTask, { foreignKey: 'task_id', as: 'task' });
+
+Store.hasMany(ProjectMemberCost, { foreignKey: 'store_id', sourceKey: 'id_code', as: 'projectMemberCosts' });
+ProjectMemberCost.belongsTo(Store, { foreignKey: 'store_id', targetKey: 'id_code', as: 'store' });
+
+User.hasMany(ProjectMemberCost, { foreignKey: 'user_id', as: 'projectMemberCosts' });
+ProjectMemberCost.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+
+Store.hasMany(ProjectNotification, { foreignKey: 'store_id', sourceKey: 'id_code', as: 'projectNotifications' });
+ProjectNotification.belongsTo(Store, { foreignKey: 'store_id', targetKey: 'id_code', as: 'store' });
+
+User.hasMany(ProjectNotification, { foreignKey: 'user_id', as: 'projectNotifications' });
+ProjectNotification.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 
 Event.hasMany(EventQuestion, { foreignKey: 'event_id', as: 'questions' });
 EventQuestion.belongsTo(Event, { foreignKey: 'event_id', as: 'event' });
@@ -372,6 +434,14 @@ module.exports = {
   ,EventJamMusicCatalog
   ,EventTicketType
   ,EventTicket
+  ,ProjectProject
+  ,ProjectMember
+  ,ProjectStage
+  ,ProjectTask
+  ,ProjectSession
+  ,ProjectTimeEntry
+  ,ProjectMemberCost
+  ,ProjectNotification
   ,Organization
   ,StoreMember
   ,StoreInvite

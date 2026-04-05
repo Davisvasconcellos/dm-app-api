@@ -86,7 +86,14 @@ router.post('/', authenticateToken, requireRole('master', 'masteradmin'), [
   } catch (error) {
     console.error('Create module error:', error);
     if (error.name === 'SequelizeUniqueConstraintError') {
-      return res.status(409).json({ error: 'Duplicate entry', message: 'Slug já existe' });
+      const path = error && error.errors && error.errors[0] && error.errors[0].path ? String(error.errors[0].path) : null;
+      if (path === 'slug') {
+        return res.status(409).json({ error: 'Duplicate entry', message: 'Slug já existe' });
+      }
+      if (path === 'id') {
+        return res.status(500).json({ error: 'Internal server error', message: 'Sequência do sys_modules está inconsistente. Rode as migrations.' });
+      }
+      return res.status(409).json({ error: 'Duplicate entry', message: 'Registro duplicado' });
     }
     return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });
   }
@@ -136,7 +143,11 @@ router.patch('/:id_code', authenticateToken, requireRole('master', 'masteradmin'
   } catch (error) {
     console.error('Patch module error:', error);
     if (error.name === 'SequelizeUniqueConstraintError') {
-      return res.status(409).json({ error: 'Duplicate entry', message: 'Slug já existe' });
+      const path = error && error.errors && error.errors[0] && error.errors[0].path ? String(error.errors[0].path) : null;
+      if (path === 'slug') {
+        return res.status(409).json({ error: 'Duplicate entry', message: 'Slug já existe' });
+      }
+      return res.status(409).json({ error: 'Duplicate entry', message: 'Registro duplicado' });
     }
     return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });
   }

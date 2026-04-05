@@ -29,6 +29,7 @@ const { TokenBlocklist } = require('./models');
 const { Op } = require('sequelize');
 const cron = require('node-cron');
 const { generatePendingTransactions } = require('./services/recurrenceService');
+const { autoCloseProjectSessionsByCutoff } = require('./services/projectTimesheetService');
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -57,6 +58,7 @@ const musicCatalogRoutes = require('./routes/musicCatalog');
 const organizationRoutes = require('./routes/organizations');
 const storeInvitesRoutes = require('./routes/storeInvites');
 const storeInvitesPublicRoutes = require('./routes/storeInvitesPublic');
+const projectRoutes = require('./routes/project');
 
 // Import middleware
 const errorHandler = require('./middlewares/errorHandler');
@@ -180,6 +182,7 @@ app.use('/api/v1/events', eventJamsRoutes); // Mount jams under events too if ne
 app.use('/api/events', eventJamsRoutes); // Alias for legacy/frontend compatibility
 app.use('/api/public/v1/events', eventOpenRoutes);
 app.use('/api/public/v1/store-invites', storeInvitesPublicRoutes);
+app.use('/api/v1/project', projectRoutes);
 app.use('/api/v1/files', filesRoutes);
 app.use('/api/v1/financial', financialRoutes);
 app.use('/api/v1/financial/recurrences', finRecurrenceRoutes);
@@ -217,6 +220,14 @@ if (!isTestEnv) {
       console.log('Daily recurrence check completed.');
     } catch (error) {
       console.error('Daily recurrence check failed:', error);
+    }
+  });
+
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      await autoCloseProjectSessionsByCutoff();
+    } catch (error) {
+      console.error('Project timesheet maintenance failed:', error);
     }
   });
 }

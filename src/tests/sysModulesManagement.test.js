@@ -1,11 +1,11 @@
 const express = require('express');
 const request = require('supertest');
 
-let currentRole = 'master';
+let mockCurrentRole = 'master';
 
 jest.mock('../middlewares/auth', () => ({
   authenticateToken: (req, res, next) => {
-    req.user = { userId: 1, role: currentRole };
+    req.user = { userId: 1, role: mockCurrentRole };
     next();
   },
   requireRole: (...roles) => (req, res, next) => {
@@ -35,7 +35,7 @@ function makeApp() {
 describe('SysModules management', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    currentRole = 'master';
+    mockCurrentRole = 'master';
   });
 
   it('GET / returns active only by default', async () => {
@@ -56,10 +56,9 @@ describe('SysModules management', () => {
   });
 
   it('POST / blocks non-master roles', async () => {
-    currentRole = 'admin';
+    mockCurrentRole = 'admin';
     const app = makeApp();
     const res = await request(app).post('/api/v1/sys-modules').send({ name: 'X', slug: 'x' });
     expect(res.statusCode).toBe(403);
   });
 });
-
