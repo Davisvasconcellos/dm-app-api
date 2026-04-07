@@ -64,7 +64,7 @@ const ProjectStage = sequelize.define('ProjectStage', {
     defaultValue: 0
   },
   total_minutes: {
-    type: DataTypes.INTEGER,
+    type: DataTypes.DECIMAL(15, 6),
     allowNull: false,
     defaultValue: 0
   },

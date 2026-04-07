@@ -63,7 +63,7 @@ const ProjectTimeEntry = sequelize.define('ProjectTimeEntry', {
     allowNull: true
   },
   minutes: {
-    type: DataTypes.INTEGER,
+    type: DataTypes.DECIMAL(15, 6),
     allowNull: true
   },
   description: {

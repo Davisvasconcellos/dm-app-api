@@ -38,7 +38,17 @@ router.get('/me/scope', authenticateToken, requireModule('project'), async (req,
           model: ProjectProject,
           as: 'project',
           attributes: ['id', 'id_code', 'store_id', 'title', 'logo_url', 'status', 'client_name', 'client_party_id', 'start_date', 'end_date'],
-          required: true
+          required: true,
+          include: [{
+            model: ProjectMember,
+            as: 'members',
+            attributes: ['id', 'id_code', 'role', 'status', 'timezone_override', 'hourly_rate_override', 'overhead_multiplier_override'],
+            include: [{
+              model: User,
+              as: 'user',
+              attributes: ['id', 'id_code', 'name', 'email', 'avatar_url']
+            }]
+          }]
         }],
         order: [['created_at', 'ASC']]
       }),
@@ -66,6 +76,24 @@ router.get('/me/scope', authenticateToken, requireModule('project'), async (req,
       if (!p || !p.store_id) continue;
       const storeIdCode = String(p.store_id);
       if (!projectsByStoreIdCode.has(storeIdCode)) projectsByStoreIdCode.set(storeIdCode, []);
+
+      const members = (p.members || []).map(m => ({
+        id: m.id_code,
+        id_code: m.id_code,
+        role: m.role,
+        status: m.status,
+        timezone_override: m.timezone_override || null,
+        hourly_rate_override: m.hourly_rate_override || null,
+        overhead_multiplier_override: m.overhead_multiplier_override || null,
+        user: m.user ? {
+          id: m.user.id_code,
+          id_code: m.user.id_code,
+          name: m.user.name,
+          email: m.user.email,
+          avatar_url: m.user.avatar_url || null
+        } : null
+      }));
+
       projectsByStoreIdCode.get(storeIdCode).push({
         id: p.id_code,
         id_code: p.id_code,
@@ -77,7 +105,8 @@ router.get('/me/scope', authenticateToken, requireModule('project'), async (req,
         start_date: p.start_date || null,
         end_date: p.end_date || null,
         my_role: j.role,
-        my_status: j.status
+        my_status: j.status,
+        members
       });
     }
 
@@ -1223,7 +1252,7 @@ async function stopTimeEntryHandler(req, res) {
 
     const now = new Date();
     const start = new Date(timeEntry.start_at);
-    const minutes = Math.max(0, Math.round((now.getTime() - start.getTime()) / 60000));
+    const minutes = Math.max(0, (now.getTime() - start.getTime()) / 60000.0);
     const hours = minutes / 60;
 
     const project = timeEntry.project_id ? await ProjectProject.findByPk(timeEntry.project_id) : null;
@@ -1292,7 +1321,7 @@ async function stopTimeEntryHandler(req, res) {
         // For simplicity and to satisfy the "single request" feel, we'll stop it here
         const taskNow = new Date();
         const taskStart = new Date(runningTask.start_at);
-        const taskMin = Math.max(0, Math.round((taskNow.getTime() - taskStart.getTime()) / 60000));
+        const taskMin = Math.max(0, (taskNow.getTime() - taskStart.getTime()) / 60000.0);
         const taskHours = taskMin / 60;
         
         const taskProj = await ProjectProject.findByPk(runningTask.project_id);
@@ -1350,7 +1379,7 @@ router.post('/time-entries/:id_code/heartbeat', requireStorePermission(['project
     await timeEntry.update({ last_heartbeat_at: now });
 
     const start = new Date(timeEntry.start_at);
-    const minutes = Math.max(0, Math.round((now.getTime() - start.getTime()) / 60000));
+    const minutes = Math.max(0, (now.getTime() - start.getTime()) / 60000.0);
     const hours = minutes / 60;
 
     let liveStage = null;
@@ -1410,6 +1439,33 @@ router.post('/time-entries/:id_code/heartbeat', requireStorePermission(['project
   }
 });
 
+router.patch(
+  '/time-entries/:id_code/note',
+  requireStorePermission(['project:read', 'project:write']),
+  [
+    body('description').optional({ nullable: true }).isString()
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ error: 'Validation error', details: errors.array() });
+
+    try {
+      const timeEntry = await ProjectTimeEntry.findOne({
+        where: { store_id: req.storeId, user_id: req.user.userId, id_code: req.params.id_code }
+      });
+      if (!timeEntry) return res.status(404).json({ error: 'Not Found', message: 'Apontamento não encontrado' });
+
+      await timeEntry.update({ description: req.body.description !== undefined ? req.body.description : null });
+      
+      const j = timeEntry.toJSON();
+      return res.json({ success: true, data: { time_entry: { ...j, id: j.id_code } } });
+    } catch (error) {
+      console.error('Patch time entry note error:', error);
+      return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });
+    }
+  }
+);
+
 router.get('/me/today', requireStorePermission(['project:read', 'project:write']), async (req, res) => {
   try {
     const store = await Store.findOne({ where: { id_code: req.storeId } });
@@ -1456,7 +1512,7 @@ router.get('/me/today', requireStorePermission(['project:read', 'project:write']
 
     for (const entry of activeEntries) {
       const startAt = new Date(entry.start_at);
-      const estMin = Math.max(0, Math.round((now.getTime() - startAt.getTime()) / 60000));
+      const estMin = Math.max(0, (now.getTime() - startAt.getTime()) / 60000.0);
       const isTask = !!entry.project_id;
 
       const rate = await getEffectiveCostRate({
@@ -1509,6 +1565,243 @@ router.get('/me/today', requireStorePermission(['project:read', 'project:write']
     return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });
   }
 });
+
+router.get(
+  '/me/timeline',
+  requireStorePermission(['project:read', 'project:write']),
+  async (req, res) => {
+    try {
+      const store = await Store.findOne({ where: { id_code: req.storeId } });
+      const storeTz = store ? store.timezone : 'America/Sao_Paulo';
+
+      const targetDateStr = req.query.date;
+      let nowLocal = targetDateStr ? moment.tz(targetDateStr, 'YYYY-MM-DD', storeTz) : moment().tz(storeTz);
+      if (!nowLocal.isValid()) nowLocal = moment().tz(storeTz);
+
+      const startOfDayUtc = nowLocal.clone().startOf('day').toDate();
+      const endOfDayUtc = nowLocal.clone().endOf('day').toDate();
+      const serverNow = new Date();
+
+      const timeEntries = await ProjectTimeEntry.findAll({
+        where: {
+          store_id: req.storeId,
+          user_id: req.user.userId,
+          status: { [Op.in]: ['closed', 'running'] },
+          start_at: { [Op.between]: [startOfDayUtc, endOfDayUtc] }
+        },
+        include: [
+          { model: ProjectProject, as: 'project', attributes: ['id', 'id_code', 'title', 'name'] },
+          { model: ProjectStage, as: 'stage', attributes: ['id', 'id_code', 'title', 'color_1'] }
+        ],
+        order: [['start_at', 'ASC']]
+      });
+
+      let generalMinutes = 0;
+      let projectMinutes = 0;
+      let generalRunning = false;
+      let generalTimeEntryId = null;
+      let startOfGeneral = null;
+
+      const projectSummaryMap = new Map();
+      const taskEntries = [];
+
+      for (const entry of timeEntries) {
+        let mins = Number(entry.minutes) || 0;
+        const isRunning = entry.status === 'running';
+        let calculatedEndAt = entry.end_at;
+
+        if (isRunning) {
+          const entryStart = new Date(entry.start_at);
+          mins = Math.max(0, (serverNow.getTime() - entryStart.getTime()) / 60000.0);
+          calculatedEndAt = serverNow;
+        }
+
+        if (!entry.project_id) {
+          generalMinutes += mins;
+          if (isRunning) {
+            generalRunning = true;
+            generalTimeEntryId = entry.id_code;
+            startOfGeneral = entry.start_at;
+          }
+        } else {
+          projectMinutes += mins;
+          if (!projectSummaryMap.has(entry.project_id)) {
+            projectSummaryMap.set(entry.project_id, {
+              id_code: entry.project ? entry.project.id_code : '',
+              name: entry.project ? (entry.project.title || entry.project.name) : 'Projeto',
+              minutes: 0
+            });
+          }
+          const pSum = projectSummaryMap.get(entry.project_id);
+          pSum.minutes += mins;
+          
+          taskEntries.push({
+            id_code: entry.id_code,
+            project_id: entry.project_id,
+            project_id_code: entry.project ? entry.project.id_code : null,
+            project_name: entry.project ? (entry.project.title || entry.project.name) : null,
+            stage_id_code: entry.stage ? entry.stage.id_code : null,
+            stage_title: entry.stage ? entry.stage.title : null,
+            stage_color_1: entry.stage ? entry.stage.color_1 : null,
+            description: entry.description,
+            start_at: entry.start_at,
+            end_at: calculatedEndAt,
+            minutes: mins,
+            is_running: isRunning
+          });
+        }
+      }
+
+      const timelineBlocks = [];
+      let currentBlock = null;
+
+      for (const t of taskEntries) {
+        if (!currentBlock || currentBlock.project.id_code !== t.project_id_code) {
+          if (currentBlock) timelineBlocks.push(currentBlock);
+          
+          currentBlock = {
+            project: { id_code: t.project_id_code, name: t.project_name },
+            block_start_at: t.start_at,
+            block_end_at: t.end_at,
+            block_minutes: 0,
+            entries: []
+          };
+        }
+        
+        currentBlock.block_minutes += t.minutes;
+        if (t.end_at && (!currentBlock.block_end_at || new Date(t.end_at) > new Date(currentBlock.block_end_at))) {
+          currentBlock.block_end_at = t.end_at;
+        }
+
+        currentBlock.entries.push({
+          id_code: t.id_code,
+          stage_id_code: t.stage_id_code,
+          stage_title: t.stage_title,
+          stage_color_1: t.stage_color_1,
+          description: t.description,
+          start_at: t.start_at,
+          end_at: t.end_at,
+          minutes: t.minutes,
+          is_running: t.is_running
+        });
+      }
+
+      if (currentBlock) timelineBlocks.push(currentBlock);
+
+      return res.json({
+        success: true,
+        data: {
+          date: nowLocal.format('YYYY-MM-DD'),
+          summary: {
+            general_minutes: generalMinutes,
+            project_minutes: projectMinutes,
+            general_is_running: generalRunning,
+            general_time_entry_id: generalTimeEntryId,
+            general_start_at: startOfGeneral,
+            projects_worked: Array.from(projectSummaryMap.values())
+          },
+          timeline_blocks: timelineBlocks
+        }
+      });
+    } catch (error) {
+      console.error('Timeline error:', error);
+      return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });
+    }
+  }
+);
+
+router.get(
+  '/me/timemarker',
+  requireStorePermission(['project:read', 'project:write']),
+  [
+    query('start_date').isISO8601(),
+    query('end_date').isISO8601()
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ error: 'Validation error', details: errors.array() });
+
+    try {
+      const store = await Store.findOne({ where: { id_code: req.storeId } });
+      const storeTz = store ? store.timezone : 'America/Sao_Paulo';
+
+      const startDateLocal = moment.tz(req.query.start_date, 'YYYY-MM-DD', storeTz);
+      const endDateLocal = moment.tz(req.query.end_date, 'YYYY-MM-DD', storeTz);
+      
+      const startOfDayUtc = startDateLocal.clone().startOf('day').toDate();
+      const endOfDayUtc = endDateLocal.clone().endOf('day').toDate();
+      const serverNow = new Date();
+
+      const timeEntries = await ProjectTimeEntry.findAll({
+        where: {
+          store_id: req.storeId,
+          user_id: req.user.userId,
+          status: { [Op.in]: ['closed', 'running'] },
+          start_at: { [Op.between]: [startOfDayUtc, endOfDayUtc] }
+        },
+        include: [
+          { model: ProjectProject, as: 'project', attributes: ['id_code', 'title'] }
+        ],
+        order: [['start_at', 'ASC']]
+      });
+
+      let periodTotalMinutes = 0;
+      const daysMap = new Map();
+
+      for (const entry of timeEntries) {
+        let mins = Number(entry.minutes) || 0;
+        const isRunning = entry.status === 'running';
+        let calculatedEndAt = entry.end_at;
+
+        if (isRunning) {
+          const entryStart = new Date(entry.start_at);
+          mins = Math.max(0, (serverNow.getTime() - entryStart.getTime()) / 60000.0);
+          calculatedEndAt = serverNow;
+        }
+
+        const dateKey = moment(entry.start_at).tz(storeTz).format('YYYY-MM-DD');
+        
+        if (!daysMap.has(dateKey)) {
+          daysMap.set(dateKey, {
+            date: dateKey,
+            total_minutes: 0,
+            markings: []
+          });
+        }
+        
+        const dayObj = daysMap.get(dateKey);
+        dayObj.total_minutes += mins;
+        periodTotalMinutes += mins;
+
+        dayObj.markings.push({
+          id_code: entry.id_code,
+          start_at: entry.start_at,
+          end_at: calculatedEndAt,
+          minutes: mins,
+          is_running: isRunning,
+          project: entry.project ? { id_code: entry.project.id_code, name: entry.project.title } : null
+        });
+      }
+
+      const daysArray = Array.from(daysMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+
+      return res.json({
+        success: true,
+        data: {
+          period: {
+            start_date: req.query.start_date,
+            end_date: req.query.end_date,
+            total_minutes: periodTotalMinutes
+          },
+          days: daysArray
+        }
+      });
+    } catch (error) {
+      console.error('Timemarker error:', error);
+      return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });
+    }
+  }
+);
 
 router.get(
   '/me/timesheet',
