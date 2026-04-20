@@ -2,7 +2,7 @@ const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { Op, fn, col } = require('sequelize');
 const { sequelize } = require('../config/database');
-const { Event, EventQuestion, EventResponse, EventAnswer, User, EventGuest, TokenBlocklist, EventTicketType, EventTicket } = require('../models');
+const { Event, EventQuestion, EventResponse, EventAnswer, User, EventGuest, TokenBlocklist, EventTicketType, EventTicket, EventJam, EventJamSong, EventJamSongLike } = require('../models');
 const { authenticateToken } = require('../middlewares/auth');
 const jwt = require('jsonwebtoken');
 const admin = require('firebase-admin');
@@ -34,6 +34,22 @@ const buildStartEndDatetime = (event) => {
   const start_datetime = date && startTime ? `${date}T${startTime}` : null;
   const end_datetime = endDate && endTime ? `${endDate}T${endTime}` : null;
   return { start_datetime, end_datetime };
+};
+
+const optionalAuth = async (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (token) {
+    try {
+      const isBlocked = await TokenBlocklist.findByPk(token);
+      if (!isBlocked) {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user = decoded;
+      }
+    } catch (err) {}
+  }
+  next();
 };
 
 /**
@@ -392,6 +408,114 @@ router.get('/:id', async (req, res) => {
     return res.json({ success: true, data: payload });
   } catch (error) {
     console.error('Get event public detail alias error:', error);
+    return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });
+  }
+});
+
+router.get('/:id/jams/planned', optionalAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const event = await Event.findOne({ where: { id_code: id, status: 'published' } });
+    if (!event) return res.status(404).json({ error: 'Not Found', message: 'Evento não encontrado' });
+
+    const jams = await EventJam.findAll({
+      where: { event_id: event.id },
+      attributes: ['id', 'id_code', 'name', 'slug', 'status'],
+      order: [['order_index', 'ASC']]
+    });
+    const jamIds = jams.map(j => j.id);
+    if (!jamIds.length) return res.json({ success: true, data: { jams: [] } });
+
+    const songs = await EventJamSong.findAll({
+      where: { jam_id: { [Op.in]: jamIds }, status: 'planned' },
+      order: [['jam_id', 'ASC'], ['order_index', 'ASC']],
+      attributes: ['id', 'id_code', 'jam_id', 'title', 'artist', 'cover_image', 'order_index', 'ready', 'catalog_id']
+    });
+
+    const songDbIds = songs.map(s => s.id);
+    const likeCounts = songDbIds.length
+      ? await EventJamSongLike.findAll({
+        where: { jam_song_id: { [Op.in]: songDbIds }, liked: true },
+        attributes: ['jam_song_id', [fn('COUNT', col('id')), 'count']],
+        group: ['jam_song_id'],
+        raw: true
+      })
+      : [];
+    const likeCountBySongId = new Map(likeCounts.map(r => [Number(r.jam_song_id), Number(r.count)]));
+
+    let likedSongIds = new Set();
+    if (req.user && req.user.userId) {
+      const rows = await EventJamSongLike.findAll({
+        where: { jam_song_id: { [Op.in]: songDbIds }, liked: true, user_id: req.user.userId },
+        attributes: ['jam_song_id'],
+        raw: true
+      });
+      likedSongIds = new Set(rows.map(r => Number(r.jam_song_id)));
+    }
+
+    const songsByJamId = new Map();
+    for (const s of songs) {
+      const sj = s.toJSON();
+      if (!songsByJamId.has(sj.jam_id)) songsByJamId.set(sj.jam_id, []);
+      songsByJamId.get(sj.jam_id).push({
+        id: sj.id_code,
+        id_code: sj.id_code,
+        title: sj.title,
+        artist: sj.artist || null,
+        cover_image: sj.cover_image || null,
+        order_index: sj.order_index,
+        ready: !!sj.ready,
+        like_count: likeCountBySongId.get(sj.id) || 0,
+        liked_by_me: likedSongIds.has(sj.id)
+      });
+    }
+
+    const data = jams
+      .map(j => {
+        const jj = j.toJSON();
+        const jsongs = songsByJamId.get(jj.id) || [];
+        return { id: jj.id_code, id_code: jj.id_code, name: jj.name, slug: jj.slug, status: jj.status, songs: jsongs };
+      })
+      .filter(j => j.songs.length > 0);
+
+    const total_songs = data.reduce((acc, jam) => acc + jam.songs.length, 0);
+    const total_likes = data.reduce((acc, jam) => acc + jam.songs.reduce((sum, s) => sum + (Number(s.like_count) || 0), 0), 0);
+
+    return res.json({ success: true, data: { jams: data }, meta: { total_songs, total_likes } });
+  } catch (error) {
+    console.error('List planned jams error:', error);
+    return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });
+  }
+});
+
+router.post('/:id/jams/:jamId/songs/:songId/like', authenticateToken, async (req, res) => {
+  try {
+    const { id, jamId, songId } = req.params;
+    const event = await Event.findOne({ where: { id_code: id, status: 'published' } });
+    if (!event) return res.status(404).json({ error: 'Not Found', message: 'Evento não encontrado' });
+
+    const jam = await EventJam.findOne({ where: { id_code: jamId, event_id: event.id } });
+    if (!jam) return res.status(404).json({ error: 'Not Found', message: 'Jam não encontrada' });
+
+    const song = await EventJamSong.findOne({ where: { id_code: songId, jam_id: jam.id, status: 'planned' } });
+    if (!song) return res.status(404).json({ error: 'Not Found', message: 'Música não encontrada' });
+
+    const where = { jam_song_id: song.id, user_id: req.user.userId };
+
+    const existing = await EventJamSongLike.findOne({ where });
+    let liked = true;
+    if (existing) {
+      await existing.destroy();
+      liked = false;
+    } else {
+      await EventJamSongLike.create({ ...where, liked: true });
+    }
+
+    const like_count = await EventJamSongLike.count({ where: { jam_song_id: song.id, liked: true } });
+
+    return res.json({ success: true, data: { liked, like_count } });
+  } catch (error) {
+    console.error('Toggle planned song like error:', error);
     return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });
   }
 });

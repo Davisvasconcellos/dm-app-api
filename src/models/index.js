@@ -26,6 +26,7 @@ const EventJamSong = require('./EventJamSong');
 const EventJamSongInstrumentSlot = require('./EventJamSongInstrumentSlot');
 const EventJamSongCandidate = require('./EventJamSongCandidate');
 const EventJamSongRating = require('./EventJamSongRating');
+const EventJamSongLike = require('./EventJamSongLike');
 const Party = require('./Party');
 const FinCategory = require('./FinCategory');
 const FinCostCenter = require('./FinCostCenter');
@@ -91,6 +92,15 @@ User.associate({ SysModule });
 // EventJamMusicCatalog Associations
 EventJamMusicCatalog.hasMany(EventJamSong, { foreignKey: 'catalog_id', as: 'jamSongs' });
 EventJamSong.belongsTo(EventJamMusicCatalog, { foreignKey: 'catalog_id', as: 'catalog' });
+
+EventJamSong.hasMany(EventJamSongLike, { foreignKey: 'jam_song_id', as: 'likes' });
+EventJamSongLike.belongsTo(EventJamSong, { foreignKey: 'jam_song_id', as: 'song' });
+
+User.hasMany(EventJamSongLike, { foreignKey: 'user_id', as: 'jamSongLikes' });
+EventJamSongLike.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+
+EventGuest.hasMany(EventJamSongLike, { foreignKey: 'event_guest_id', as: 'jamSongLikes' });
+EventJamSongLike.belongsTo(EventGuest, { foreignKey: 'event_guest_id', as: 'guest' });
 
 EventJamMusicCatalog.hasMany(EventJamMusicSuggestion, { foreignKey: 'catalog_id', as: 'suggestions' });
 EventJamMusicSuggestion.belongsTo(EventJamMusicCatalog, { foreignKey: 'catalog_id', as: 'catalog' });
@@ -423,6 +433,7 @@ module.exports = {
   ,EventJamSongInstrumentSlot
   ,EventJamSongCandidate
   ,EventJamSongRating
+  ,EventJamSongLike
   ,Party
   ,FinCategory
   ,FinCostCenter

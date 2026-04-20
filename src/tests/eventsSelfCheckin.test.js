@@ -46,8 +46,8 @@ describe('Events self-checkin', () => {
       id: 10,
       id_code: 'evt-1',
       status: 'published',
-      date: '2026-04-06',
-      end_date: '2026-04-06',
+      date: '2099-04-06',
+      end_date: '2099-04-06',
       start_time: '10:00:00',
       end_time: '23:00:00',
       auto_checkin: true
@@ -61,4 +61,3 @@ describe('Events self-checkin', () => {
     expect(res.body.code).toBe('need_ticket');
   });
 });
-
