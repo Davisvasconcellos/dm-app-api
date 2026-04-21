@@ -488,6 +488,44 @@ router.get('/:id/jams/planned', optionalAuth, async (req, res) => {
   }
 });
 
+router.get('/:id/jams/my-likes', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const event = await Event.findOne({ where: { id_code: id, status: 'published' } });
+    if (!event) return res.status(404).json({ error: 'Not Found', message: 'Evento não encontrado' });
+
+    const jams = await EventJam.findAll({
+      where: { event_id: event.id },
+      attributes: ['id'],
+      raw: true
+    });
+    const jamIds = jams.map(j => j.id);
+    if (!jamIds.length) return res.json({ success: true, data: { liked_song_ids: [] } });
+
+    const songs = await EventJamSong.findAll({
+      where: { jam_id: { [Op.in]: jamIds }, status: 'planned' },
+      attributes: ['id', 'id_code'],
+      raw: true
+    });
+    const songDbIds = songs.map(s => s.id);
+    if (!songDbIds.length) return res.json({ success: true, data: { liked_song_ids: [] } });
+
+    const likes = await EventJamSongLike.findAll({
+      where: { jam_song_id: { [Op.in]: songDbIds }, user_id: req.user.userId, liked: true },
+      attributes: ['jam_song_id'],
+      raw: true
+    });
+
+    const likedDbIdSet = new Set(likes.map(l => Number(l.jam_song_id)));
+    const liked_song_ids = songs.filter(s => likedDbIdSet.has(Number(s.id))).map(s => s.id_code);
+
+    return res.json({ success: true, data: { liked_song_ids } });
+  } catch (error) {
+    console.error('List my jam likes error:', error);
+    return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });
+  }
+});
+
 router.post('/:id/jams/:jamId/songs/:songId/like', authenticateToken, async (req, res) => {
   try {
     const { id, jamId, songId } = req.params;
@@ -503,17 +541,16 @@ router.post('/:id/jams/:jamId/songs/:songId/like', authenticateToken, async (req
     const where = { jam_song_id: song.id, user_id: req.user.userId };
 
     const existing = await EventJamSongLike.findOne({ where });
-    let liked = true;
     if (existing) {
-      await existing.destroy();
-      liked = false;
+      const like_count = await EventJamSongLike.count({ where: { jam_song_id: song.id, liked: true } });
+      return res.json({ success: true, data: { liked: true, like_count, already_liked: true } });
     } else {
       await EventJamSongLike.create({ ...where, liked: true });
     }
 
     const like_count = await EventJamSongLike.count({ where: { jam_song_id: song.id, liked: true } });
 
-    return res.json({ success: true, data: { liked, like_count } });
+    return res.json({ success: true, data: { liked: true, like_count, already_liked: false } });
   } catch (error) {
     console.error('Toggle planned song like error:', error);
     return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });

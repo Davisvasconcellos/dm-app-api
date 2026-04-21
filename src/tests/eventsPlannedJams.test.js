@@ -77,7 +77,6 @@ describe('Public planned jams', () => {
     Event.findOne.mockResolvedValue({ id: 1 });
     EventJam.findOne.mockResolvedValue({ id: 10 });
     EventJamSong.findOne.mockResolvedValue({ id: 100 });
-    EventGuest.findOne.mockResolvedValue({ id: 50 });
     EventJamSongLike.findOne.mockResolvedValue(null);
     EventJamSongLike.create.mockResolvedValue({ id: 1 });
     EventJamSongLike.count.mockResolvedValue(1);
@@ -87,5 +86,21 @@ describe('Public planned jams', () => {
     expect(res.statusCode).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.data.like_count).toBe(1);
+    expect(res.body.data.liked).toBe(true);
+  });
+
+  it('lists my liked planned songs', async () => {
+    Event.findOne.mockResolvedValue({ id: 1 });
+    EventJam.findAll.mockResolvedValue([{ id: 10 }]);
+    EventJamSong.findAll.mockResolvedValue([
+      { id: 100, id_code: 'song-1', jam_id: 10, status: 'planned' }
+    ]);
+    EventJamSongLike.findAll.mockResolvedValue([{ jam_song_id: 100 }]);
+
+    const app = makeApp();
+    const res = await request(app).get('/api/public/v1/events/evt-1/jams/my-likes');
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.liked_song_ids).toEqual(['song-1']);
   });
 });
