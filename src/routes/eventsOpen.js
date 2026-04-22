@@ -2,7 +2,7 @@ const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { Op, fn, col } = require('sequelize');
 const { sequelize } = require('../config/database');
-const { Event, EventQuestion, EventResponse, EventAnswer, User, EventGuest, TokenBlocklist, EventTicketType, EventTicket, EventJam, EventJamSong, EventJamSongLike } = require('../models');
+const { Event, EventQuestion, EventResponse, EventAnswer, User, EventGuest, TokenBlocklist, EventTicketType, EventTicket, EventJam, EventJamSong, EventJamSongLike, Store } = require('../models');
 const { authenticateToken } = require('../middlewares/auth');
 const jwt = require('jsonwebtoken');
 const admin = require('firebase-admin');
@@ -283,23 +283,74 @@ router.get('/public', async (req, res) => {
     })();
     const rows = await Event.findAll({
       where,
-      attributes: ['id', 'id_code', 'name', 'slug', 'banner_url', 'date', 'end_date', 'start_time', 'end_time', 'public_url', 'gallery_url', 'place', 'description', 'created_at'],
+      attributes: ['id', 'id_code', 'name', 'slug', 'banner_url', 'date', 'end_date', 'start_time', 'end_time', 'public_url', 'gallery_url', 'place', 'description', 'created_at', 'store_id'],
       order: orderClause,
       offset,
       limit
     });
 
+    const eventIds = rows.map(r => r.id).filter(id => id != null);
+    const storeIds = Array.from(new Set(rows.map(r => r.store_id).filter(id => id != null)));
+
+    let storesById = new Map();
+    if (storeIds.length > 0) {
+      const stores = await Store.findAll({
+        where: { id: { [Op.in]: storeIds } },
+        attributes: ['id', 'latitude', 'longitude']
+      });
+      storesById = new Map(stores.map(s => [s.id, s]));
+    }
+
+    let avatarsByEventId = new Map();
+    if (eventIds.length > 0) {
+      const tickets = await EventTicket.findAll({
+        where: {
+          event_id: { [Op.in]: eventIds },
+          status: { [Op.in]: ['reserved', 'checked_in'] }
+        },
+        include: [
+          {
+            model: User,
+            as: 'user',
+            attributes: ['avatar_url']
+          }
+        ],
+        attributes: ['event_id']
+      });
+
+      avatarsByEventId = new Map();
+      for (const t of tickets) {
+        const eId = t.event_id;
+        if (!eId) continue;
+        const user = t.user;
+        if (!user || !user.avatar_url) continue;
+        if (!avatarsByEventId.has(eId)) avatarsByEventId.set(eId, []);
+        const arr = avatarsByEventId.get(eId);
+        if (arr.includes(user.avatar_url)) continue;
+        if (arr.length >= 10) continue;
+        arr.push(user.avatar_url);
+      }
+    }
+
+    const events = rows.map(r => {
+      const j = r.toJSON();
+      const store = storesById.get(r.store_id) || null;
+      j.lat = store && store.latitude != null ? Number(store.latitude) : null;
+      j.lng = store && store.longitude != null ? Number(store.longitude) : null;
+      const avatars = avatarsByEventId.get(r.id) || [];
+      j.attendees_avatars = avatars;
+      j.id = j.id_code;
+      delete j.store_id;
+      const dt = buildStartEndDatetime(j);
+      j.start_datetime = dt.start_datetime;
+      j.end_datetime = dt.end_datetime;
+      return j;
+    });
+
     return res.json({
       success: true,
       data: {
-        events: rows.map(r => {
-          const j = r.toJSON();
-          j.id = j.id_code; // Sanitiza ID
-          const dt = buildStartEndDatetime(j);
-          j.start_datetime = dt.start_datetime;
-          j.end_datetime = dt.end_datetime;
-          return j;
-        })
+        events
       },
       meta: {
         total,
@@ -323,53 +374,44 @@ router.get('/:id/detail', async (req, res) => {
       return res.status(404).json({ error: 'Not Found', message: 'Evento não encontrado' });
     }
 
-    const payload = {
-      id: event.id,
-      id_code: event.id_code,
-      name: event.name,
-      slug: event.slug,
-      description: event.description,
-      banner_url: event.banner_url,
-      public_url: event.public_url,
-      gallery_url: event.gallery_url,
-      place: event.place,
-      start_time: event.start_time,
-      end_time: event.end_time,
-      date: event.date,
-      end_date: event.end_date || event.date,
-      status: event.status,
-      resp_email: event.resp_email,
-      resp_name: event.resp_name,
-      resp_phone: event.resp_phone,
-      color_1: event.color_1,
-      color_2: event.color_2,
-      card_background: event.card_background,
-      card_background_type: event.card_background_type,
-      auto_checkin: !!event.auto_checkin,
-      requires_auto_checkin: !!event.requires_auto_checkin,
-      auto_checkin_flow_quest: !!event.auto_checkin_flow_quest,
-      checkin_component_config: event.checkin_component_config || null,
-      created_at: event.created_at,
-      updated_at: event.updated_at
-    };
-    const dt = buildStartEndDatetime(payload);
-    payload.start_datetime = dt.start_datetime;
-    payload.end_datetime = dt.end_datetime;
+    let lat = null;
+    let lng = null;
+    if (event.store_id) {
+      const store = await Store.findOne({
+        where: { id: event.store_id },
+        attributes: ['latitude', 'longitude']
+      });
+      if (store) {
+        lat = store.latitude != null ? Number(store.latitude) : null;
+        lng = store.longitude != null ? Number(store.longitude) : null;
+      }
+    }
 
-    return res.json({ success: true, data: payload });
-  } catch (error) {
-    console.error('Get event detail error:', error);
-    return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });
-  }
-});
-
-// GET /api/events/:id - alias público para detalhes do evento por id_code (v1)
-router.get('/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const event = await Event.findOne({ where: { id_code: id, status: 'published' } });
-    if (!event) {
-      return res.status(404).json({ error: 'Not Found', message: 'Evento não encontrado' });
+    let attendees_avatars = [];
+    const tickets = await EventTicket.findAll({
+      where: {
+        event_id: event.id,
+        status: { [Op.in]: ['reserved', 'checked_in'] }
+      },
+      include: [
+        {
+          model: User,
+          as: 'user',
+          attributes: ['avatar_url']
+        }
+      ],
+      attributes: []
+    });
+    if (tickets && tickets.length) {
+      const avatarsSet = new Set();
+      for (const t of tickets) {
+        const user = t.user;
+        if (!user || !user.avatar_url) continue;
+        if (avatarsSet.has(user.avatar_url)) continue;
+        avatarsSet.add(user.avatar_url);
+        attendees_avatars.push(user.avatar_url);
+        if (attendees_avatars.length >= 10) break;
+      }
     }
 
     const payload = {
@@ -399,7 +441,102 @@ router.get('/:id', async (req, res) => {
       auto_checkin_flow_quest: !!event.auto_checkin_flow_quest,
       checkin_component_config: event.checkin_component_config || null,
       created_at: event.created_at,
-      updated_at: event.updated_at
+      updated_at: event.updated_at,
+      lat,
+      lng,
+      attendees_avatars
+    };
+    const dt = buildStartEndDatetime(payload);
+    payload.start_datetime = dt.start_datetime;
+    payload.end_datetime = dt.end_datetime;
+
+    return res.json({ success: true, data: payload });
+  } catch (error) {
+    console.error('Get event detail error:', error);
+    return res.status(500).json({ error: 'Internal server error', message: 'Erro interno do servidor' });
+  }
+});
+
+// GET /api/events/:id - alias público para detalhes do evento por id_code (v1)
+router.get('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const event = await Event.findOne({ where: { id_code: id, status: 'published' } });
+    if (!event) {
+      return res.status(404).json({ error: 'Not Found', message: 'Evento não encontrado' });
+    }
+
+    let lat = null;
+    let lng = null;
+    if (event.store_id) {
+      const store = await Store.findOne({
+        where: { id: event.store_id },
+        attributes: ['latitude', 'longitude']
+      });
+      if (store) {
+        lat = store.latitude != null ? Number(store.latitude) : null;
+        lng = store.longitude != null ? Number(store.longitude) : null;
+      }
+    }
+
+    let attendees_avatars = [];
+    const tickets = await EventTicket.findAll({
+      where: {
+        event_id: event.id,
+        status: { [Op.in]: ['reserved', 'checked_in'] }
+      },
+      include: [
+        {
+          model: User,
+          as: 'user',
+          attributes: ['avatar_url']
+        }
+      ],
+      attributes: []
+    });
+    if (tickets && tickets.length) {
+      const avatarsSet = new Set();
+      for (const t of tickets) {
+        const user = t.user;
+        if (!user || !user.avatar_url) continue;
+        if (avatarsSet.has(user.avatar_url)) continue;
+        avatarsSet.add(user.avatar_url);
+        attendees_avatars.push(user.avatar_url);
+        if (attendees_avatars.length >= 10) break;
+      }
+    }
+
+    const payload = {
+      id: event.id,
+      id_code: event.id_code,
+      name: event.name,
+      slug: event.slug,
+      description: event.description,
+      banner_url: event.banner_url,
+      public_url: event.public_url,
+      gallery_url: event.gallery_url,
+      place: event.place,
+      start_time: event.start_time,
+      end_time: event.end_time,
+      date: event.date,
+      end_date: event.end_date || event.date,
+      status: event.status,
+      resp_email: event.resp_email,
+      resp_name: event.resp_name,
+      resp_phone: event.resp_phone,
+      color_1: event.color_1,
+      color_2: event.color_2,
+      card_background: event.card_background,
+      card_background_type: event.card_background_type,
+      auto_checkin: !!event.auto_checkin,
+      requires_auto_checkin: !!event.requires_auto_checkin,
+      auto_checkin_flow_quest: !!event.auto_checkin_flow_quest,
+      checkin_component_config: event.checkin_component_config || null,
+      created_at: event.created_at,
+      updated_at: event.updated_at,
+      lat,
+      lng,
+      attendees_avatars
     };
     const dt = buildStartEndDatetime(payload);
     payload.start_datetime = dt.start_datetime;
@@ -751,6 +888,11 @@ router.post('/:id/tickets/reserve', authenticateToken, [
     }
 
     const userId = req.user.userId;
+    const user = await User.findByPk(userId);
+    if (!user) {
+      return res.status(401).json({ error: 'Unauthorized', message: 'Usuário não encontrado' });
+    }
+    const lowerEmail = (user.email || '').toLowerCase();
     const requestedTypeIdCode = req.body.ticket_type_id ? String(req.body.ticket_type_id) : null;
 
     const t = await sequelize.transaction();
@@ -761,6 +903,55 @@ router.post('/:id/tickets/reserve', authenticateToken, [
         lock: t.LOCK.UPDATE
       });
       if (existingActive) {
+        let guest = await EventGuest.findOne({
+          where: { event_id: event.id, user_id: userId },
+          transaction: t,
+          lock: t.LOCK.UPDATE
+        });
+        if (!guest && lowerEmail) {
+          guest = await EventGuest.findOne({
+            where: {
+              event_id: event.id,
+              [Op.and]: [sequelize.where(fn('LOWER', col('guest_email')), lowerEmail)]
+            },
+            transaction: t,
+            lock: t.LOCK.UPDATE
+          });
+        }
+        if (guest) {
+          const updatePayload = {
+            user_id: guest.user_id || userId,
+            guest_name: guest.guest_name || user.name || 'Guest',
+            guest_email: guest.guest_email || user.email || null,
+            guest_phone: guest.guest_phone || user.phone || null,
+            rsvp_confirmed: true,
+            rsvp_at: guest.rsvp_at || now
+          };
+          if (existingActive.status === 'checked_in' && !guest.check_in_at) {
+            updatePayload.check_in_at = existingActive.checked_in_at || now;
+            updatePayload.check_in_method = 'auto_checkin';
+          }
+          await guest.update(updatePayload, { transaction: t });
+        } else {
+          await EventGuest.create({
+            event_id: event.id,
+            user_id: userId,
+            guest_name: user.name || 'Guest',
+            guest_email: user.email || null,
+            guest_phone: user.phone || null,
+            guest_document_type: null,
+            guest_document_number: null,
+            type: 'normal',
+            source: 'invited',
+            rsvp_confirmed: true,
+            rsvp_at: now,
+            invited_at: now,
+            invited_by_user_id: null,
+            check_in_at: existingActive.status === 'checked_in' ? (existingActive.checked_in_at || now) : null,
+            check_in_method: existingActive.status === 'checked_in' ? 'auto_checkin' : null,
+            authorized_by_user_id: null
+          }, { transaction: t });
+        }
         await t.commit();
         const qr_token = buildEventTicketQrToken({
           ticket_id: existingActive.id_code,
@@ -843,6 +1034,54 @@ router.post('/:id/tickets/reserve', authenticateToken, [
         currency: ticketType.currency,
         metadata: { source: 'public_reserve' }
       }, { transaction: t });
+
+      let guest = await EventGuest.findOne({
+        where: { event_id: event.id, user_id: userId },
+        transaction: t,
+        lock: t.LOCK.UPDATE
+      });
+      if (!guest && lowerEmail) {
+        guest = await EventGuest.findOne({
+          where: {
+            event_id: event.id,
+            [Op.and]: [sequelize.where(fn('LOWER', col('guest_email')), lowerEmail)]
+          },
+          transaction: t,
+          lock: t.LOCK.UPDATE
+        });
+      }
+      if (!guest) {
+        await EventGuest.create({
+          event_id: event.id,
+          user_id: userId,
+          guest_name: user.name || 'Guest',
+          guest_email: user.email || null,
+          guest_phone: user.phone || null,
+          guest_document_type: null,
+          guest_document_number: null,
+          type: 'normal',
+          source: 'invited',
+          rsvp_confirmed: true,
+          rsvp_at: now,
+          invited_at: now,
+          invited_by_user_id: null,
+          check_in_at: null,
+          check_in_method: null,
+          authorized_by_user_id: null
+        }, { transaction: t });
+      } else {
+        const updatePayload = {
+          user_id: guest.user_id || userId,
+          guest_name: guest.guest_name || user.name || 'Guest',
+          guest_email: guest.guest_email || user.email || null,
+          guest_phone: guest.guest_phone || user.phone || null
+        };
+        if (!guest.rsvp_confirmed) {
+          updatePayload.rsvp_confirmed = true;
+          updatePayload.rsvp_at = now;
+        }
+        await guest.update(updatePayload, { transaction: t });
+      }
 
       await t.commit();
       const qr_token = buildEventTicketQrToken({

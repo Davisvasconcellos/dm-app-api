@@ -2025,10 +2025,58 @@ router.get('/:id/guests', authenticateToken, requireRole('admin', 'master'), req
       limit: pageSize
     });
 
+    const guestUserIds = guests.map(g => g.user_id).filter(id => id != null);
+    const guestEmails = guests
+      .map(g => (g.user?.email || g.guest_email || '').trim().toLowerCase())
+      .filter(e => e);
+    let ticketsByUserId = new Map();
+    let ticketsByEmail = new Map();
+    if (guestUserIds.length > 0 || guestEmails.length > 0) {
+      const tickets = await EventTicket.findAll({
+        where: { event_id: event.id },
+        include: [
+          { model: User, as: 'user', attributes: ['id', 'email'] }
+        ],
+        attributes: ['user_id', 'status']
+      });
+      for (const t of tickets) {
+        const uid = t.user_id;
+        const email = t.user && t.user.email ? String(t.user.email).trim().toLowerCase() : null;
+        if (uid != null) {
+          if (!ticketsByUserId.has(uid)) ticketsByUserId.set(uid, []);
+          ticketsByUserId.get(uid).push(t.status);
+        }
+        if (email) {
+          if (!ticketsByEmail.has(email)) ticketsByEmail.set(email, []);
+          ticketsByEmail.get(email).push(t.status);
+        }
+      }
+    }
+
     const normalized = guests.map(g => {
-      const origin_status = g.source === 'invited'
-        ? 'pre_list'
-        : (g.check_in_method === 'google' ? 'open_login' : 'front_desk');
+      const emailKey = (g.user?.email || g.guest_email || '').trim().toLowerCase();
+      const userTicketsById = g.user_id ? (ticketsByUserId.get(g.user_id) || []) : [];
+      const userTicketsByEmail = !userTicketsById.length && emailKey ? (ticketsByEmail.get(emailKey) || []) : [];
+      const userTickets = userTicketsById.length ? userTicketsById : userTicketsByEmail;
+      const hasTickets = userTickets.length > 0;
+      const hasReserved = userTickets.includes('reserved');
+      const hasCheckedInTicket = userTickets.includes('checked_in');
+      let ticket_status = null;
+      if (hasReserved && !hasCheckedInTicket) ticket_status = 'reserved';
+      else if (hasCheckedInTicket && !hasReserved) ticket_status = 'checked_in';
+      else if (hasReserved && hasCheckedInTicket) ticket_status = 'mixed';
+
+      let origin_status;
+      if (ticket_status === 'reserved' && !g.check_in_at) {
+        origin_status = 'ticket_reserved';
+      } else if (g.source === 'invited') {
+        origin_status = 'pre_list';
+      } else if (g.check_in_method === 'google') {
+        origin_status = 'open_login';
+      } else {
+        origin_status = 'front_desk';
+      }
+
       return {
         id: g.id_code,
         display_name: g.user?.name || g.guest_name,
@@ -2038,6 +2086,8 @@ router.get('/:id/guests', authenticateToken, requireRole('admin', 'master'), req
         phone: g.user?.phone || g.guest_phone || null,
         type: g.type,
         origin_status,
+        has_ticket: hasTickets,
+        ticket_status,
         rsvp: !!g.rsvp_at,
         rsvp_at: g.rsvp_at,
         check_in_at: g.check_in_at,
@@ -2085,13 +2135,27 @@ router.get('/:id/guests', authenticateToken, requireRole('admin', 'master'), req
       }
     }
 
+    const ticketStatusAgg = await EventTicket.findAll({
+      where: { event_id: event.id },
+      attributes: ['status', [fn('COUNT', col('*')), 'count']],
+      group: ['status']
+    });
+    const tickets_by_status = { reserved: 0, checked_in: 0, canceled: 0, expired: 0 };
+    for (const row of ticketStatusAgg) {
+      const key = row.get('status');
+      if (tickets_by_status[key] !== undefined) {
+        tickets_by_status[key] = parseInt(row.get('count'), 10);
+      }
+    }
+
     const stats = {
       total_guests: totalGuestsAll,
       rsvp_count: rsvpCountAll,
       checkin_count: checkinCountAll,
       by_source,
       by_type,
-      by_check_in_method
+      by_check_in_method,
+      tickets_by_status
     };
 
     return res.json({ success: true, data: { guests: normalized, stats }, meta: { total, page, page_size: pageSize, pages: Math.ceil(total / pageSize) } });
